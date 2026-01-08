@@ -21,8 +21,8 @@ def check_login():
         return True
 
     # Login UI
-    st.title("🔒 Restricted Access")
-    st.markdown("Please log in to access the FrontThree Tools.")
+    st.title("🔒 Front Three's YouTube AI Bot")
+    st.markdown("Please log in to access the bot.")
 
     with st.form("login_form"):
         username_input = st.text_input("Username")
@@ -38,7 +38,7 @@ def check_login():
                 # THE FIX: We now compare the correct variables
                 if username_input == real_user and password_input == real_pass:
                     st.session_state["authenticated"] = True
-                    st.success("✅ Access Granted. Loading...")
+                    st.success("✅ Login successful. Logging in...")
                     time.sleep(1)
                     st.rerun()
                 else:
