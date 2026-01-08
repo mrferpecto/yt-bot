@@ -7,20 +7,19 @@ import zipfile
 import io
 import time
 import re
+import requests
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="FrontThree Suite", page_icon="⚡", layout="wide")
 
 # --- AUTHENTICATION ---
 def check_login():
-    """Handles the login gate securely."""
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
 
     if st.session_state["authenticated"]:
         return True
 
-    # Login UI
     st.title("🔒 Restricted Access")
     st.markdown("Please log in to access the FrontThree Tools.")
 
@@ -31,33 +30,25 @@ def check_login():
 
         if submit_button:
             try:
-                # Check against Streamlit Secrets
                 real_user = st.secrets["login"]["username"]
                 real_pass = st.secrets["login"]["password"]
 
-                # Validation
                 if username_input == real_user and password_input == real_pass:
                     st.session_state["authenticated"] = True
-                    st.success("✅ Access Granted. Loading...")
-                    time.sleep(1)
+                    st.success("✅ Access Granted.")
+                    time.sleep(0.5)
                     st.rerun()
                 else:
-                    st.error("❌ Access Denied: Incorrect credentials.")
+                    st.error("❌ Access Denied.")
             except KeyError:
-                st.error("🚨 System Error: Secrets are not configured correctly in Streamlit Cloud.")
-                st.info("Please check your [login] section in the settings.")
-            except Exception as e:
-                st.error(f"❌ An unexpected error occurred: {e}")
-    
+                st.error("🚨 System Error: Secrets not configured correctly.")
     return False
 
 # --- API HELPER FUNCTIONS ---
 
 def get_video_stats_batch(video_ids, api_key):
-    """Fetches statistics for a list of video IDs."""
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        # Process in chunks of 50 (YouTube API limit)
         all_items = []
         for i in range(0, len(video_ids), 50):
             chunk = video_ids[i:i+50]
@@ -72,240 +63,209 @@ def get_video_stats_batch(video_ids, api_key):
         st.error(f"YouTube API Error: {e}")
         return []
 
-def get_video_comments(video_id, api_key):
-    """Fetches comments for a single video."""
+def get_video_comments(video_id, api_key, max_limit=300):
+    """Fetches comments with pagination up to max_limit."""
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.commentThreads().list(
-            part="snippet", videoId=video_id, maxResults=50, textFormat="plainText"
-        )
-        response = request.execute()
-        comments = [item['snippet']['topLevelComment']['snippet']['textDisplay'] for item in response['items']]
+        comments = []
+        next_page_token = None
+        
+        # Loop to fetch multiple pages (Pagination)
+        while len(comments) < max_limit:
+            request = youtube.commentThreads().list(
+                part="snippet",
+                videoId=video_id,
+                maxResults=100, # Max allowed per page
+                textFormat="plainText",
+                pageToken=next_page_token
+            )
+            response = request.execute()
+            
+            for item in response['items']:
+                text = item['snippet']['topLevelComment']['snippet']['textDisplay']
+                comments.append(text)
+            
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token:
+                break # No more comments
+                
         return comments
     except Exception as e:
         st.error(f"Error fetching comments: {e}")
-        return []
+        return comments # Return whatever we got so far
 
 def download_thumbnail_bytes(url):
-    """Downloads thumbnail image to memory."""
     try:
         ydl_opts = {'quiet': True, 'writethumbnail': True, 'skip_download': True, 'outtmpl': '-'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             thumb_url = info['thumbnail']
-            # We need to download the image content using requests logic
-            # Using a simple trick with yt_dlp to get the URL
-            import requests
+            # Direct request to image URL
             response = requests.get(thumb_url)
-            safe_title = re.sub(r'[\\/*?:"<>|]', "", info['title']) # Clean filename
+            safe_title = re.sub(r'[\\/*?:"<>|]', "", info['title'])
             return response.content, f"{safe_title[:30]}.jpg"
     except Exception as e:
         return None, str(e)
 
+# --- AI WRAPPER (THE FALLBACK FIX) ---
+def ask_gemini(prompt, api_key):
+    """Tries Flash first, falls back to Pro if it fails."""
+    genai.configure(api_key=api_key)
+    
+    # Intento 1: Flash (Rápido)
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        return model.generate_content(prompt).text
+    except Exception:
+        # Intento 2: Pro (Estándar - Fallback)
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            return model.generate_content(prompt).text
+        except Exception as e:
+            return f"❌ AI Error: {e}. (Check requirements.txt version)"
+
 # --- MAIN APPLICATION ---
 
 def main_app():
-    # Load API Keys securely
     try:
         YT_KEY = st.secrets["api"]["youtube_key"]
         GEMINI_KEY = st.secrets["api"]["gemini_key"]
     except KeyError:
-        st.error("🚨 API Keys are missing in secrets.toml (check [api] section).")
+        st.error("🚨 API Keys missing in secrets.")
         st.stop()
 
-    # Sidebar
     st.sidebar.success(f"User: {st.secrets['login']['username']}")
     if st.sidebar.button("Logout"):
         st.session_state["authenticated"] = False
         st.rerun()
 
     st.title("⚡ FrontThree YT Management Suite")
-
-    # Tabs
     tab1, tab2, tab3 = st.tabs(["📊 Analytics Chat", "📥 Downloader", "🔴 Deep Dive"])
 
-    # ==========================================
-    # TAB 1: GLOBAL ANALYTICS & CHAT
-    # ==========================================
+    # TAB 1: ANALYTICS
     with tab1:
         st.header("🧠 Chat with your Data")
-        st.markdown("Paste multiple video URLs to analyze patterns.")
-
-        urls_input = st.text_area("Paste Video URLs (comma separated or new lines):", height=100)
+        urls_input = st.text_area("Paste Video URLs:", height=100)
         
         if "analytics_data" not in st.session_state:
             st.session_state.analytics_data = None
 
         if st.button("Load Data"):
-            # Extract IDs using Regex
-            ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", urls_input)
-            ids = list(set(ids)) # Remove duplicates
-            
+            ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", urls_input)))
             if ids:
                 with st.spinner(f"Analyzing {len(ids)} videos..."):
                     raw_data = get_video_stats_batch(ids, YT_KEY)
-                    
-                    clean_data = []
-                    for item in raw_data:
-                        stats = item['statistics']
-                        clean_data.append({
-                            "Title": item['snippet']['title'],
-                            "Views": int(stats.get('viewCount', 0)),
-                            "Likes": int(stats.get('likeCount', 0)),
-                            "Comments": int(stats.get('commentCount', 0)),
-                            "Date": item['snippet']['publishedAt'][:10]
-                        })
-                    
+                    clean_data = [{
+                        "Title": item['snippet']['title'],
+                        "Views": int(item['statistics'].get('viewCount', 0)),
+                        "Likes": int(item['statistics'].get('likeCount', 0)),
+                        "Comments": int(item['statistics'].get('commentCount', 0)),
+                        "Date": item['snippet']['publishedAt'][:10]
+                    } for item in raw_data]
                     st.session_state.analytics_data = pd.DataFrame(clean_data)
-                    st.success(f"✅ Loaded data for {len(clean_data)} videos!")
+                    st.success("✅ Data Loaded!")
             else:
-                st.warning("No valid YouTube URLs found.")
+                st.warning("No valid URLs.")
 
-        # Chat Interface
         if st.session_state.analytics_data is not None:
             st.dataframe(st.session_state.analytics_data, hide_index=True)
+            if "messages" not in st.session_state: st.session_state.messages = []
             
-            # Chat History
-            if "messages" not in st.session_state:
-                st.session_state.messages = []
-
             for msg in st.session_state.messages:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+                with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-            if prompt := st.chat_input("Ask about your data (e.g., 'Best performing title?'):"):
+            if prompt := st.chat_input("Ask about your data..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-
+                with st.chat_message("user"): st.markdown(prompt)
+                
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking..."):
-                        try:
-                            # Gemini Call - Updated Model
-                            genai.configure(api_key=GEMINI_KEY)
-                            model = genai.GenerativeModel('gemini-1.5-flash')
-                            
-                            context = st.session_state.analytics_data.to_string()
-                            full_prompt = (
-                                f"You are a YouTube Analytics expert. Here is my video data:\n{context}\n\n"
-                                f"Question: {prompt}\nAnswer in English. Be concise and data-driven."
-                            )
-                            response = model.generate_content(full_prompt)
-                            st.markdown(response.text)
-                            st.session_state.messages.append({"role": "assistant", "content": response.text})
-                        except Exception as e:
-                            st.error(f"AI Error: {e}")
+                        context = st.session_state.analytics_data.to_string()
+                        full_prompt = f"Data:\n{context}\n\nUser Question: {prompt}\nAnswer in English."
+                        response = ask_gemini(full_prompt, GEMINI_KEY)
+                        st.markdown(response)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
 
-    # ==========================================
-    # TAB 2: DOWNLOADER CENTER
-    # ==========================================
+    # TAB 2: DOWNLOADER
     with tab2:
-        st.header("📥 Media Downloader")
-        dl_urls = st.text_area("Paste URLs to download assets:", key="dl_area")
-        video_ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)
-        video_ids = list(set(video_ids))
-
+        st.header("📥 Downloader")
+        st.info("ℹ️ Note: Cloud downloads are limited to the best single file (usually 720p) to preserve audio. For 1080p/4K, run this tool locally.")
+        
+        dl_urls = st.text_area("Paste URLs to download:", key="dl_area")
+        video_ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)))
+        
         col1, col2 = st.columns(2)
-
-        # Thumbnails (Batch ZIP)
         with col1:
-            st.subheader("Thumbnails")
-            if st.button("Download All Thumbnails (ZIP)"):
+            if st.button("Download Thumbnails (ZIP)"):
                 if video_ids:
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w") as zf:
-                        progress = st.progress(0)
-                        for i, vid_id in enumerate(video_ids):
-                            url = f"https://www.youtube.com/watch?v={vid_id}"
-                            data, name = download_thumbnail_bytes(url)
-                            if data: zf.writestr(name, data)
-                            progress.progress((i + 1) / len(video_ids))
-                    
-                    st.success("ZIP Ready!")
-                    st.download_button(
-                        label="⬇️ Download ZIP",
-                        data=zip_buffer.getvalue(),
-                        file_name="thumbnails.zip",
-                        mime="application/zip"
-                    )
-                else:
-                    st.warning("No URLs found.")
+                        prog = st.progress(0)
+                        for i, vid in enumerate(video_ids):
+                            d, n = download_thumbnail_bytes(f"https://youtu.be/{vid}")
+                            if d: zf.writestr(n, d)
+                            prog.progress((i+1)/len(video_ids))
+                    st.download_button("⬇️ Download ZIP", zip_buffer.getvalue(), "thumbs.zip", "application/zip")
 
-        # Video Links (Direct)
         with col2:
-            st.subheader("Video Files (MP4)")
-            if st.button("Generate Download Links"):
+            if st.button("Get Video Links"):
                 if video_ids:
-                    st.info("Generating direct links (Server-safe mode):")
-                    for vid_id in video_ids:
-                        url = f"https://www.youtube.com/watch?v={vid_id}"
+                    for vid in video_ids:
                         try:
+                            # Search for best MP4 that HAS audio
                             with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
-                                info = ydl.extract_info(url, download=False)
-                                title = info.get('title', 'Video')
-                                # Find best MP4
-                                found = False
+                                info = ydl.extract_info(f"https://youtu.be/{vid}", download=False)
+                                
+                                # Filter formats manually to get best resolution with audio
+                                best_url = None
+                                best_res = 0
+                                
                                 for f in info['formats']:
-                                    if f.get('ext') == 'mp4' and f.get('vcodec') != 'none':
-                                        st.markdown(f"🎥 **{title}**: [Click to Download]({f['url']})")
-                                        found = True
-                                        break
-                                if not found:
-                                    st.warning(f"No direct MP4 link found for {title}")
-                        except:
-                            st.error(f"Error processing {vid_id}")
-                else:
-                    st.warning("No URLs found.")
+                                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
+                                        height = f.get('height', 0)
+                                        if height > best_res:
+                                            best_res = height
+                                            best_url = f['url']
+                                
+                                if best_url:
+                                    st.markdown(f"🎥 **{info['title']}** ({best_res}p): [Download MP4]({best_url})")
+                                else:
+                                    st.warning(f"No direct link found for {info['title']}")
+                        except: st.error(f"Error: {vid}")
 
-    # ==========================================
-    # TAB 3: SINGLE VIDEO DEEP DIVE
-    # ==========================================
+    # TAB 3: DEEP DIVE
     with tab3:
         st.header("🔴 Single Video Analysis")
-        sv_url = st.text_input("YouTube URL:", placeholder="https://...")
+        sv_url = st.text_input("URL:")
+        task = st.selectbox("Action:", ["Summarize Comments", "Generate Video Ideas", "Detect Questions", "SEO Optimization"])
         
-        task = st.selectbox("Select Action:", [
-            "Summarize Comments", 
-            "Generate Video Ideas", 
-            "Detect Unanswered Questions", 
-            "SEO Optimization"
-        ])
-
-        if st.button("Analyze Video"):
-            vid_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
-            if vid_id_match:
-                with st.spinner("Fetching comments..."):
-                    comments = get_video_comments(vid_id_match.group(1), YT_KEY)
+        if st.button("Analyze"):
+            vid = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
+            if vid:
+                with st.spinner("Fetching UP TO 300 comments..."):
+                    # Using the new pagination function
+                    comments = get_video_comments(vid.group(1), YT_KEY, max_limit=300)
                 
                 if comments:
-                    st.success(f"Analyzed {len(comments)} comments.")
-                    text_data = "\n".join(comments)
+                    st.success(f"Successfully analyzed {len(comments)} comments!")
                     
-                    # Prompts
+                    # Truncate text if it's too huge for Gemini (Safety limit)
+                    full_text = "\n".join(comments)
+                    if len(full_text) > 30000: 
+                        full_text = full_text[:30000] + "\n...(truncated)"
+                    
                     prompts = {
-                        "Summarize Comments": f"Summarize sentiment and main points:\n{text_data}",
-                        "Generate Video Ideas": f"Suggest 5 future video titles based on this feedback:\n{text_data}",
-                        "Detect Unanswered Questions": f"List specific questions asking for help:\n{text_data}",
-                        "SEO Optimization": f"Create SEO tags and description based on these topics:\n{text_data}"
+                        "Summarize Comments": f"Summarize sentiment and key topics:\n{full_text}",
+                        "Generate Video Ideas": f"Suggest 5 future video ideas based on this feedback:\n{full_text}",
+                        "Detect Questions": f"Extract unanswered questions asking for help:\n{full_text}",
+                        "SEO Optimization": f"Generate SEO tags and description based on:\n{full_text}"
                     }
-                    
                     with st.spinner("Gemini is thinking..."):
-                        try:
-                            # Gemini Call - Updated Model
-                            genai.configure(api_key=GEMINI_KEY)
-                            model = genai.GenerativeModel('gemini-1.5-flash')
-                            
-                            response = model.generate_content(prompts[task])
-                            st.markdown("### 🤖 Results")
-                            st.write(response.text)
-                        except Exception as e:
-                            st.error(f"AI Error: {e}")
-                else:
-                    st.warning("No comments found (or comments disabled).")
-            else:
-                st.error("Invalid URL.")
+                        response = ask_gemini(prompts[task], GEMINI_KEY)
+                        st.markdown("### 🤖 Results")
+                        st.markdown(response)
+                else: st.warning("No comments found.")
 
-# --- ENTRY POINT ---
 if __name__ == "__main__":
     if check_login():
         main_app()
