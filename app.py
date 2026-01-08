@@ -1,272 +1,378 @@
 import streamlit as st
 import google.generativeai as genai
 from googleapiclient.discovery import build
+from youtube_transcript_api import YouTubeTranscriptApi
 import pandas as pd
+import plotly.express as px
 import yt_dlp
 import zipfile
 import io
 import time
 import re
 import requests
+from PIL import Image
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="FrontThree Suite", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="FrontThree Master Suite", page_icon="🔥", layout="wide")
+
+# --- COMPETITOR DATABASE (Front Three Niche) ---
+COMPETITORS = {
+    "Select a Competitor...": "",
+    "Sidemen": "Sidemen",
+    "Beta Squad": "BetaSquad",
+    "The Overlap (Gary Neville)": "TheOverlap",
+    "Ben Foster - The Cycling GK": "BenFosterTheCyclingGK",
+    "Pitch Side": "PitchSide",
+    "FilthyFellas": "FilthyFellas",
+    "The Fellas": "TheFellas",
+    "John Nellis": "JohnNellis",
+    "ChrisMD": "ChrisMD",
+    "Miniminter": "Miniminter",
+    "Thogden": "Thogden",
+    "Box2Box Show": "Box2BoxShow",
+    "Get Stuck In": "GetStuckIn",
+    "Sports Dr": "SportsDr",
+    "Rio Ferdinand Presents": "RioFerdinandPresents",
+    "Stick to Football": "StickToFootball",
+    "Club 1872": "Club1872",
+    "Shoot for Love": "ShootForLove",
+    "UMM": "UMM",
+    "JD Sports": "JDSports",
+    "Footasylum": "Footasylum",
+    "Bleacher Report Football": "BleacherReportFootball",
+    "Sky Sports Premier League": "SkySportsPL",
+    "SpencerFC": "SpencerFC",
+    "Calfreezy": "Calfreezy",
+    "Zerkaa": "Zerkaa",
+    "Danny Aarons": "DannyAarons",
+    "Girth N Turf": "GirthNTurf",
+    "Sharky": "Sharky",
+    "Chunkz": "Chunkz"
+}
 
 # --- AUTHENTICATION ---
 def check_login():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
+    if st.session_state["authenticated"]: return True
 
-    if st.session_state["authenticated"]:
-        return True
-
-    st.title("🔒 Restricted Access")
-    st.markdown("Please log in to access the FrontThree Tools.")
-
-    with st.form("login_form"):
-        username_input = st.text_input("Username")
-        password_input = st.text_input("Password", type="password") 
-        if st.form_submit_button("Login"):
+    st.title("🔒 FrontThree Master Suite")
+    with st.form("login"):
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+        if st.form_submit_button("Access System"):
             try:
-                real_user = st.secrets["login"]["username"]
-                real_pass = st.secrets["login"]["password"]
-                if username_input == real_user and password_input == real_pass:
+                if user == st.secrets["login"]["username"] and pwd == st.secrets["login"]["password"]:
                     st.session_state["authenticated"] = True
-                    st.success("✅ Access Granted.")
-                    time.sleep(0.5)
                     st.rerun()
-                else:
-                    st.error("❌ Invalid credentials.")
-            except KeyError:
-                st.error("🚨 System Error: Secrets not configured.")
+                else: st.error("❌ Access Denied")
+            except: st.error("🚨 Secrets Error")
     return False
 
 # --- INTELLIGENT MODEL SELECTOR ---
-def get_best_available_model(api_key):
-    """Finds the best model available in YOUR account automatically."""
+def get_best_model(api_key):
     genai.configure(api_key=api_key)
     try:
-        # Get all models your key can see
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Priority list (Newest/Fastest first)
-        priorities = [
-            'models/gemini-2.5-flash',
-            'models/gemini-2.0-flash',
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro'
-        ]
-        
-        # Check if we have any of the priority models
-        for p in priorities:
-            if p in available_models:
-                return p
-        
-        # Fallback: Just take the first one available if none of the above match
-        if available_models:
-            return available_models[0]
-        
-        return None
-    except Exception as e:
-        return None
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Prefer models that support Images + Text (Flash/Pro 1.5/2.0)
+        priority = ['models/gemini-2.0-flash', 'models/gemini-1.5-flash', 'models/gemini-1.5-pro']
+        for p in priority:
+            if p in models: return p
+        return models[0] if models else None
+    except: return None
 
-# --- API HELPERS ---
-def get_video_stats_batch(video_ids, api_key):
+# --- HELPER FUNCTIONS ---
+def get_channel_videos(channel_handle, api_key, limit=10):
+    """Search for channel ID by handle then fetch videos."""
+    youtube = build('youtube', 'v3', developerKey=api_key)
     try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        all_items = []
-        for i in range(0, len(video_ids), 50):
-            chunk = video_ids[i:i+50]
-            request = youtube.videos().list(
-                part="snippet,statistics",
-                id=",".join(chunk)
-            )
-            response = request.execute()
-            all_items.extend(response.get('items', []))
-        return all_items
+        # 1. Get Channel ID
+        search = youtube.search().list(q=channel_handle, type="channel", part="id", maxResults=1).execute()
+        if not search['items']: return []
+        chan_id = search['items'][0]['id']['channelId']
+        
+        # 2. Get Videos
+        search_vids = youtube.search().list(channelId=chan_id, type="video", part="id", order="date", maxResults=limit).execute()
+        vid_ids = [item['id']['videoId'] for item in search_vids['items']]
+        
+        # 3. Get Stats
+        stats = youtube.videos().list(part="snippet,statistics", id=",".join(vid_ids)).execute()
+        return stats.get('items', [])
     except Exception as e:
-        st.error(f"YouTube API Error: {e}")
+        st.error(f"Error fetching competitor: {e}")
         return []
 
-def get_video_comments(video_id, api_key, max_limit=300):
+def get_transcript(video_id):
     try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        comments = []
-        next_page_token = None
-        while len(comments) < max_limit:
-            request = youtube.commentThreads().list(
-                part="snippet", videoId=video_id, maxResults=100,
-                textFormat="plainText", pageToken=next_page_token
-            )
-            response = request.execute()
-            for item in response['items']:
-                comments.append(item['snippet']['topLevelComment']['snippet']['textDisplay'])
-            next_page_token = response.get('nextPageToken')
-            if not next_page_token: break
-        return comments
+        # Tries to get English or Spanish, or auto-generated
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'es', 'en-GB', 'auto'])
+        full_text = " ".join([entry['text'] for entry in transcript])
+        return full_text
     except Exception as e:
-        st.error(f"Error fetching comments: {e}")
-        return comments
+        return None
 
-def download_thumbnail_bytes(url):
+def download_image_from_url(url):
     try:
-        ydl_opts = {'quiet': True, 'writethumbnail': True, 'skip_download': True, 'outtmpl': '-'}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            response = requests.get(info['thumbnail'])
-            safe_title = re.sub(r'[\\/*?:"<>|]', "", info['title'])
-            return response.content, f"{safe_title[:30]}.jpg"
-    except Exception as e:
-        return None, str(e)
-
-# --- AI WRAPPER ---
-def ask_gemini(prompt, api_key):
-    # 1. Auto-detect best model
-    model_name = get_best_available_model(api_key)
-    
-    if not model_name:
-        return "❌ Error: No compatible Gemini models found for your API Key."
-
-    # 2. Generate Content
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        return model.generate_content(prompt).text
-    except Exception as e:
-        return f"❌ AI Error ({model_name}): {e}"
+        resp = requests.get(url, stream=True)
+        return Image.open(io.BytesIO(resp.content))
+    except: return None
 
 # --- MAIN APP ---
 def main_app():
     try:
         YT_KEY = st.secrets["api"]["youtube_key"]
         GEMINI_KEY = st.secrets["api"]["gemini_key"]
-    except KeyError:
-        st.error("🚨 API Keys missing in secrets.")
-        st.stop()
+    except: st.stop()
 
-    st.sidebar.success(f"User: {st.secrets['login']['username']}")
+    st.sidebar.title("🔥 F3 Suite")
+    st.sidebar.success(f"Operative: {st.secrets['login']['username']}")
     
-    # Show connected model in sidebar (Peace of mind)
-    connected_model = get_best_available_model(GEMINI_KEY)
-    if connected_model:
-        st.sidebar.info(f"🤖 Connected to: {connected_model.replace('models/', '')}")
-    else:
-        st.sidebar.error("⚠️ No AI Model found")
+    # Model Status
+    model_name = get_best_model(GEMINI_KEY)
+    st.sidebar.caption(f"Brain: {model_name.split('/')[-1] if model_name else 'Offline'}")
 
-    if st.sidebar.button("Logout"):
-        st.session_state["authenticated"] = False
-        st.rerun()
+    # TABS
+    tab_comp, tab_thumb, tab_deep, tab_dl = st.tabs([
+        "🕵️ Competitor Spy", 
+        "👁️ Thumbnail Rater", 
+        "🧠 Deep Dive (Transcript+Data)", 
+        "📥 Downloader"
+    ])
 
-    st.title("⚡ FrontThree YT Management Suite")
-    tab1, tab2, tab3 = st.tabs(["📊 Analytics Chat", "📥 Downloader", "🔴 Deep Dive"])
-
-    # TAB 1: ANALYTICS
-    with tab1:
-        st.header("🧠 Chat with your Data")
-        urls_input = st.text_area("Paste Video URLs:", height=100)
+    # ==================================================
+    # 1. COMPETITOR SPY & DASHBOARD
+    # ==================================================
+    with tab_comp:
+        st.header("🕵️ Competitor Intelligence")
         
-        if "analytics_data" not in st.session_state:
-            st.session_state.analytics_data = None
+        col_c1, col_c2 = st.columns([1, 2])
+        with col_c1:
+            selected_comp = st.selectbox("Choose a Rival:", list(COMPETITORS.keys()))
+            custom_handle = st.text_input("Or type Handle (e.g. @Sidemen):")
+        
+        target = custom_handle if custom_handle else (COMPETITORS[selected_comp] if selected_comp else None)
 
-        if st.button("Load Data"):
-            ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", urls_input)))
-            if ids:
-                with st.spinner(f"Analyzing {len(ids)} videos..."):
-                    raw_data = get_video_stats_batch(ids, YT_KEY)
-                    clean_data = [{
-                        "Title": item['snippet']['title'],
-                        "Views": int(item['statistics'].get('viewCount', 0)),
-                        "Likes": int(item['statistics'].get('likeCount', 0)),
-                        "Comments": int(item['statistics'].get('commentCount', 0)),
-                        "Date": item['snippet']['publishedAt'][:10]
-                    } for item in raw_data]
-                    st.session_state.analytics_data = pd.DataFrame(clean_data)
-                    st.success("✅ Data Loaded!")
-            else:
-                st.warning("No valid URLs.")
+        if st.button("Analyze Rival") and target:
+            with st.spinner(f"Spying on {target}..."):
+                data = get_channel_videos(target, YT_KEY, limit=20)
+                if data:
+                    rows = []
+                    for item in data:
+                        rows.append({
+                            "Title": item['snippet']['title'],
+                            "Views": int(item['statistics'].get('viewCount', 0)),
+                            "Likes": int(item['statistics'].get('likeCount', 0)),
+                            "Comments": int(item['statistics'].get('commentCount', 0)),
+                            "Date": item['snippet']['publishedAt'][:10]
+                        })
+                    df = pd.DataFrame(rows)
+                    st.session_state['comp_data'] = df
+                    st.success("✅ Data Acquired")
+                else: st.warning("Target not found.")
 
-        if st.session_state.analytics_data is not None:
-            st.dataframe(st.session_state.analytics_data, hide_index=True)
-            if "messages" not in st.session_state: st.session_state.messages = []
+        if 'comp_data' in st.session_state:
+            df = st.session_state['comp_data']
             
-            for msg in st.session_state.messages:
-                with st.chat_message(msg["role"]): st.markdown(msg["content"])
+            # 📊 Visual Dashboard
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_views = px.bar(df, x='Title', y='Views', title="Last 20 Videos Performance", color='Views')
+                fig_views.update_layout(xaxis={'visible': False}) 
+                st.plotly_chart(fig_views, use_container_width=True)
+            with c2:
+                fig_scat = px.scatter(df, x='Views', y='Likes', size='Comments', hover_name='Title', title="Engagement Matrix (Views vs Likes)")
+                st.plotly_chart(fig_scat, use_container_width=True)
 
-            if prompt := st.chat_input("Ask about your data..."):
-                st.session_state.messages.append({"role": "user", "content": prompt})
+            # Chat with Competitor Data
+            st.divider()
+            st.subheader("💬 Ask about this Competitor")
+            if "comp_msgs" not in st.session_state: st.session_state.comp_msgs = []
+            
+            for m in st.session_state.comp_msgs:
+                with st.chat_message(m["role"]): st.markdown(m["content"])
+            
+            if prompt := st.chat_input("Ex: What content format works best for them?"):
+                st.session_state.comp_msgs.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
                 
                 with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
-                        context = st.session_state.analytics_data.to_string()
-                        full_prompt = f"Data:\n{context}\n\nUser Question: {prompt}\nAnswer in English."
-                        response = ask_gemini(full_prompt, GEMINI_KEY)
-                        st.markdown(response)
-                        st.session_state.messages.append({"role": "assistant", "content": response})
+                    genai.configure(api_key=GEMINI_KEY)
+                    model = genai.GenerativeModel(model_name)
+                    ctx = df.to_string()
+                    res = model.generate_content(f"Analyze this competitor data:\n{ctx}\n\nUser: {prompt}").text
+                    st.markdown(res)
+                    st.session_state.comp_msgs.append({"role": "assistant", "content": res})
 
-    # TAB 2: DOWNLOADER
-    with tab2:
-        st.header("📥 Downloader")
-        st.info("ℹ️ Note: Cloud downloads are limited to the best MP4 with audio (720p).")
-        dl_urls = st.text_area("Paste URLs to download:", key="dl_area")
-        video_ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)))
+    # ==================================================
+    # 2. THUMBNAIL VISION (URL & UPLOAD)
+    # ==================================================
+    with tab_thumb:
+        st.header("👁️ AI Thumbnail Critic")
+        st.info("Upload or Paste. The AI will rate CTR potential and composition.")
+
+        col_t1, col_t2 = st.columns(2)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Download Thumbnails (ZIP)"):
-                if video_ids:
-                    zip_buffer = io.BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w") as zf:
-                        prog = st.progress(0)
-                        for i, vid in enumerate(video_ids):
-                            d, n = download_thumbnail_bytes(f"https://youtu.be/{vid}")
-                            if d: zf.writestr(n, d)
-                            prog.progress((i+1)/len(video_ids))
-                    st.download_button("⬇️ Download ZIP", zip_buffer.getvalue(), "thumbs.zip", "application/zip")
-
-        with col2:
-            if st.button("Get Video Links"):
-                if video_ids:
-                    for vid in video_ids:
-                        try:
-                            with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
-                                info = ydl.extract_info(f"https://youtu.be/{vid}", download=False)
-                                best_url = None
-                                best_res = 0
-                                for f in info['formats']:
-                                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
-                                        h = f.get('height', 0)
-                                        if h > best_res:
-                                            best_res = h
-                                            best_url = f['url']
-                                if best_url:
-                                    st.markdown(f"🎥 **{info['title']}**: [Download]({best_url})")
-                                else: st.warning(f"No direct link for {info['title']}")
-                        except: st.error(f"Error: {vid}")
-
-    # TAB 3: DEEP DIVE
-    with tab3:
-        st.header("🔴 Single Video Analysis")
-        sv_url = st.text_input("URL:")
-        task = st.selectbox("Action:", ["Summarize Comments", "Generate Video Ideas", "Detect Questions", "SEO Optimization"])
+        # Initialize State for Image
+        if "thumb_img" not in st.session_state: st.session_state.thumb_img = None
         
-        if st.button("Analyze"):
-            vid = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
-            if vid:
-                with st.spinner("Fetching comments..."):
-                    comments = get_video_comments(vid.group(1), YT_KEY)
-                if comments:
-                    full_text = "\n".join(comments)[:30000]
-                    prompts = {
-                        "Summarize Comments": f"Summarize sentiment:\n{full_text}",
-                        "Generate Video Ideas": f"5 video ideas based on:\n{full_text}",
-                        "Detect Questions": f"Questions needing answers in:\n{full_text}",
-                        "SEO Optimization": f"SEO tags for:\n{full_text}"
-                    }
-                    with st.spinner("Thinking..."):
-                        st.write(ask_gemini(prompts[task], GEMINI_KEY))
-                else: st.warning("No comments found.")
+        with col_t1:
+            st.subheader("A. Existing Video")
+            url_th = st.text_input("Paste YouTube URL:")
+            if st.button("Fetch Thumbnail"):
+                vid_id = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url_th)
+                if vid_id:
+                    # Get Max Res
+                    img_url = f"https://img.youtube.com/vi/{vid_id.group(1)}/maxresdefault.jpg"
+                    st.session_state.thumb_img = download_image_from_url(img_url)
+                    if not st.session_state.thumb_img: # Fallback
+                        img_url = f"https://img.youtube.com/vi/{vid_id.group(1)}/hqdefault.jpg"
+                        st.session_state.thumb_img = download_image_from_url(img_url)
+
+        with col_t2:
+            st.subheader("B. File Upload")
+            uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'png', 'jpeg'])
+            if uploaded_file:
+                st.session_state.thumb_img = Image.open(uploaded_file)
+
+        # Analysis Area
+        if st.session_state.thumb_img:
+            st.image(st.session_state.thumb_img, caption="Analyzed Asset", width=400)
+            
+            # Initial Analysis Button
+            if st.button("🚀 Analyze Thumbnail"):
+                with st.spinner("AI is looking at the image..."):
+                    genai.configure(api_key=GEMINI_KEY)
+                    model = genai.GenerativeModel(model_name)
+                    prompt = "Act as a YouTube Expert. Rate this thumbnail 1-10. Analyze: Colors, Faces, Text readability, and Curiosity Gap. Be critical."
+                    res = model.generate_content([prompt, st.session_state.thumb_img]).text
+                    st.session_state['thumb_analysis'] = res
+            
+            if 'thumb_analysis' in st.session_state:
+                st.markdown(st.session_state['thumb_analysis'])
+
+            # Chat with Thumbnail
+            st.subheader("💬 Chat with this Thumbnail")
+            if "thumb_chat" not in st.session_state: st.session_state.thumb_chat = []
+
+            for m in st.session_state.thumb_chat:
+                with st.chat_message(m["role"]): st.markdown(m["content"])
+
+            if prompt_th := st.chat_input("Ex: Would a red arrow help?"):
+                st.session_state.thumb_chat.append({"role": "user", "content": prompt_th})
+                with st.chat_message("user"): st.markdown(prompt_th)
+                
+                with st.chat_message("assistant"):
+                    genai.configure(api_key=GEMINI_KEY)
+                    model = genai.GenerativeModel(model_name)
+                    # MULTIMODAL CALL (Image + History + New Prompt)
+                    res = model.generate_content([
+                        "You are analyzing the provided image.", 
+                        prompt_th, 
+                        st.session_state.thumb_img
+                    ]).text
+                    st.markdown(res)
+                    st.session_state.thumb_chat.append({"role": "assistant", "content": res})
+
+    # ==================================================
+    # 3. DEEP DIVE (TRANSCRIPT + STATS + CROSS CHECK)
+    # ==================================================
+    with tab_deep:
+        st.header("🧠 Deep Content Brain")
+        st.markdown("This tool reads the **Transcript**, checks **Stats**, reads **Comments**, and looks at the **Thumbnail** simultaneously.")
+        
+        dd_url = st.text_input("YouTube URL for Deep Dive:")
+        
+        if "dd_data" not in st.session_state: 
+            st.session_state.dd_data = {}
+
+        if st.button("⚡ Initialize Deep Analysis"):
+            vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dd_url)
+            if vid_match:
+                vid_id = vid_match.group(1)
+                with st.spinner("📥 Downloading Brain Data..."):
+                    # 1. Transcript
+                    transcript = get_transcript(vid_id)
+                    st.session_state.dd_data['transcript'] = transcript if transcript else "No transcript available."
+                    
+                    # 2. Stats & Title
+                    youtube = build('youtube', 'v3', developerKey=YT_KEY)
+                    vid_req = youtube.videos().list(part="snippet,statistics", id=vid_id).execute()
+                    if vid_req['items']:
+                        item = vid_req['items'][0]
+                        st.session_state.dd_data['title'] = item['snippet']['title']
+                        st.session_state.dd_data['stats'] = item['statistics']
+                        # 3. Thumbnail
+                        thumb_url = item['snippet']['thumbnails'].get('maxres', {}).get('url') or item['snippet']['thumbnails']['high']['url']
+                        st.session_state.dd_data['image'] = download_image_from_url(thumb_url)
+                    
+                    # 4. Comments (Top 50)
+                    com_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=50, textFormat="plainText").execute()
+                    comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in com_req.get('items', [])]
+                    st.session_state.dd_data['comments'] = "\n".join(comments)
+
+                    st.success("✅ All Data Loaded! Transcript hidden but ready.")
+            else: st.error("Invalid URL")
+
+        # Chat Interface for Deep Dive
+        if st.session_state.dd_data:
+            st.divider()
+            
+            # Show small context summary
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Views", st.session_state.dd_data['stats'].get('viewCount'))
+            c2.metric("Likes", st.session_state.dd_data['stats'].get('likeCount'))
+            c3.info(f"Transcript Length: {len(st.session_state.dd_data['transcript'])} chars")
+
+            st.subheader("💬 Query the Video Brain")
+            
+            if "dd_chat" not in st.session_state: st.session_state.dd_chat = []
+
+            for m in st.session_state.dd_chat:
+                with st.chat_message(m["role"]): st.markdown(m["content"])
+
+            if prompt_dd := st.chat_input("Ex: Why did retention drop? Cross reference transcript with comments."):
+                st.session_state.dd_chat.append({"role": "user", "content": prompt_dd})
+                with st.chat_message("user"): st.markdown(prompt_dd)
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("Connecting dots..."):
+                        genai.configure(api_key=GEMINI_KEY)
+                        model = genai.GenerativeModel(model_name)
+                        
+                        # THE MEGA PROMPT
+                        # We pass the IMAGE and the TEXT Context together
+                        inputs = [
+                            f"""
+                            CONTEXT:
+                            Title: {st.session_state.dd_data['title']}
+                            Stats: {st.session_state.dd_data['stats']}
+                            Transcript: {st.session_state.dd_data['transcript'][:25000]} (truncated if too long)
+                            Comments: {st.session_state.dd_data['comments']}
+                            
+                            TASK:
+                            Answer the user question by CROSS-REFERENCING the visual thumbnail (image provided), 
+                            the spoken content (transcript), and the audience reaction (comments/stats).
+                            
+                            USER QUESTION: {prompt_dd}
+                            """,
+                            st.session_state.dd_data['image'] # Pass the image object!
+                        ]
+                        
+                        res = model.generate_content(inputs).text
+                        st.markdown(res)
+                        st.session_state.dd_chat.append({"role": "assistant", "content": res})
+
+    # ==================================================
+    # 4. DOWNLOADER (Legacy)
+    # ==================================================
+    with tab_dl:
+        st.header("📥 Media Downloader")
+        dl_text = st.text_area("URLs:")
+        if st.button("Generate Links"):
+            ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_text)
+            for vid in ids:
+                st.markdown(f"**Video {vid}**: [Link](https://www.youtube.com/watch?v={vid}) (Use local tool for 4K)")
 
 if __name__ == "__main__":
     if check_login():
