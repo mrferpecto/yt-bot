@@ -11,7 +11,7 @@ import re
 # --- CONFIGURATION ---
 st.set_page_config(page_title="FrontThree Suite", page_icon="⚡", layout="wide")
 
-# --- AUTHENTICATION (FIXED) ---
+# --- AUTHENTICATION ---
 def check_login():
     """Handles the login gate securely."""
     if "authenticated" not in st.session_state:
@@ -21,12 +21,12 @@ def check_login():
         return True
 
     # Login UI
-    st.title("🔒 Front Three's YouTube AI Bot")
-    st.markdown("Please log in to access the bot.")
+    st.title("🔒 Restricted Access")
+    st.markdown("Please log in to access the FrontThree Tools.")
 
     with st.form("login_form"):
         username_input = st.text_input("Username")
-        password_input = st.text_input("Password", type="password") # Variable name is 'password_input'
+        password_input = st.text_input("Password", type="password") 
         submit_button = st.form_submit_button("Login")
 
         if submit_button:
@@ -35,17 +35,17 @@ def check_login():
                 real_user = st.secrets["login"]["username"]
                 real_pass = st.secrets["login"]["password"]
 
-                # THE FIX: We now compare the correct variables
+                # Validation
                 if username_input == real_user and password_input == real_pass:
                     st.session_state["authenticated"] = True
-                    st.success("✅ Login successful. Logging in...")
+                    st.success("✅ Access Granted. Loading...")
                     time.sleep(1)
                     st.rerun()
                 else:
                     st.error("❌ Access Denied: Incorrect credentials.")
             except KeyError:
                 st.error("🚨 System Error: Secrets are not configured correctly in Streamlit Cloud.")
-                st.info("Check your [login] section in the settings.")
+                st.info("Please check your [login] section in the settings.")
             except Exception as e:
                 st.error(f"❌ An unexpected error occurred: {e}")
     
@@ -57,12 +57,17 @@ def get_video_stats_batch(video_ids, api_key):
     """Fetches statistics for a list of video IDs."""
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.videos().list(
-            part="snippet,statistics",
-            id=",".join(video_ids)
-        )
-        response = request.execute()
-        return response.get('items', [])
+        # Process in chunks of 50 (YouTube API limit)
+        all_items = []
+        for i in range(0, len(video_ids), 50):
+            chunk = video_ids[i:i+50]
+            request = youtube.videos().list(
+                part="snippet,statistics",
+                id=",".join(chunk)
+            )
+            response = request.execute()
+            all_items.extend(response.get('items', []))
+        return all_items
     except Exception as e:
         st.error(f"YouTube API Error: {e}")
         return []
@@ -72,7 +77,7 @@ def get_video_comments(video_id, api_key):
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
         request = youtube.commentThreads().list(
-            part="snippet", videoId=video_id, maxResults=40, textFormat="plainText"
+            part="snippet", videoId=video_id, maxResults=50, textFormat="plainText"
         )
         response = request.execute()
         comments = [item['snippet']['topLevelComment']['snippet']['textDisplay'] for item in response['items']]
@@ -83,14 +88,17 @@ def get_video_comments(video_id, api_key):
 
 def download_thumbnail_bytes(url):
     """Downloads thumbnail image to memory."""
-    buffer = io.BytesIO()
-    ydl_opts = {'quiet': True, 'writethumbnail': True, 'skip_download': True, 'outtmpl': '-'}
     try:
+        ydl_opts = {'quiet': True, 'writethumbnail': True, 'skip_download': True, 'outtmpl': '-'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             thumb_url = info['thumbnail']
+            # We need to download the image content using requests logic
+            # Using a simple trick with yt_dlp to get the URL
             import requests
-            return requests.get(thumb_url).content, f"{info['title'][:50]}.jpg" # Limit filename length
+            response = requests.get(thumb_url)
+            safe_title = re.sub(r'[\\/*?:"<>|]', "", info['title']) # Clean filename
+            return response.content, f"{safe_title[:30]}.jpg"
     except Exception as e:
         return None, str(e)
 
@@ -123,12 +131,13 @@ def main_app():
         st.header("🧠 Chat with your Data")
         st.markdown("Paste multiple video URLs to analyze patterns.")
 
-        urls_input = st.text_area("Paste Video URLs (comma separated):", height=100)
+        urls_input = st.text_area("Paste Video URLs (comma separated or new lines):", height=100)
         
         if "analytics_data" not in st.session_state:
             st.session_state.analytics_data = None
 
         if st.button("Load Data"):
+            # Extract IDs using Regex
             ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", urls_input)
             ids = list(set(ids)) # Remove duplicates
             
@@ -148,9 +157,9 @@ def main_app():
                         })
                     
                     st.session_state.analytics_data = pd.DataFrame(clean_data)
-                    st.success("✅ Data Loaded!")
+                    st.success(f"✅ Loaded data for {len(clean_data)} videos!")
             else:
-                st.warning("No valid URLs found.")
+                st.warning("No valid YouTube URLs found.")
 
         # Chat Interface
         if st.session_state.analytics_data is not None:
@@ -171,18 +180,21 @@ def main_app():
 
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking..."):
-                        # Gemini Call
-                        genai.configure(api_key=GEMINI_KEY)
-                        model = genai.GenerativeModel('model = genai.GenerativeModel('gemini-1.5-flash')
-                        
-                        context = st.session_state.analytics_data.to_string()
-                        full_prompt = (
-                            f"You are a YouTube Analytics expert. Here is my video data:\n{context}\n\n"
-                            f"Question: {prompt}\nAnswer in English."
-                        )
-                        response = model.generate_content(full_prompt)
-                        st.markdown(response.text)
-                        st.session_state.messages.append({"role": "assistant", "content": response.text})
+                        try:
+                            # Gemini Call - Updated Model
+                            genai.configure(api_key=GEMINI_KEY)
+                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            
+                            context = st.session_state.analytics_data.to_string()
+                            full_prompt = (
+                                f"You are a YouTube Analytics expert. Here is my video data:\n{context}\n\n"
+                                f"Question: {prompt}\nAnswer in English. Be concise and data-driven."
+                            )
+                            response = model.generate_content(full_prompt)
+                            st.markdown(response.text)
+                            st.session_state.messages.append({"role": "assistant", "content": response.text})
+                        except Exception as e:
+                            st.error(f"AI Error: {e}")
 
     # ==========================================
     # TAB 2: DOWNLOADER CENTER
@@ -191,6 +203,7 @@ def main_app():
         st.header("📥 Media Downloader")
         dl_urls = st.text_area("Paste URLs to download assets:", key="dl_area")
         video_ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)
+        video_ids = list(set(video_ids))
 
         col1, col2 = st.columns(2)
 
@@ -208,6 +221,7 @@ def main_app():
                             if data: zf.writestr(name, data)
                             progress.progress((i + 1) / len(video_ids))
                     
+                    st.success("ZIP Ready!")
                     st.download_button(
                         label="⬇️ Download ZIP",
                         data=zip_buffer.getvalue(),
@@ -222,17 +236,22 @@ def main_app():
             st.subheader("Video Files (MP4)")
             if st.button("Generate Download Links"):
                 if video_ids:
-                    st.info("Generating high-speed direct links (Cloud Safe Mode):")
+                    st.info("Generating direct links (Server-safe mode):")
                     for vid_id in video_ids:
                         url = f"https://www.youtube.com/watch?v={vid_id}"
                         try:
                             with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
                                 info = ydl.extract_info(url, download=False)
+                                title = info.get('title', 'Video')
                                 # Find best MP4
+                                found = False
                                 for f in info['formats']:
                                     if f.get('ext') == 'mp4' and f.get('vcodec') != 'none':
-                                        st.markdown(f"🎥 **{info['title']}**: [Click to Download]({f['url']})")
+                                        st.markdown(f"🎥 **{title}**: [Click to Download]({f['url']})")
+                                        found = True
                                         break
+                                if not found:
+                                    st.warning(f"No direct MP4 link found for {title}")
                         except:
                             st.error(f"Error processing {vid_id}")
                 else:
@@ -253,10 +272,10 @@ def main_app():
         ])
 
         if st.button("Analyze Video"):
-            vid_id = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
-            if vid_id:
+            vid_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
+            if vid_id_match:
                 with st.spinner("Fetching comments..."):
-                    comments = get_video_comments(vid_id.group(1), YT_KEY)
+                    comments = get_video_comments(vid_id_match.group(1), YT_KEY)
                 
                 if comments:
                     st.success(f"Analyzed {len(comments)} comments.")
@@ -271,13 +290,18 @@ def main_app():
                     }
                     
                     with st.spinner("Gemini is thinking..."):
-                        genai.configure(api_key=GEMINI_KEY)
-                        model = genai.GenerativeModel('gemini-1.5-flash')
-                        response = model.generate_content(prompts[task])
-                        st.markdown("### 🤖 Results")
-                        st.write(response.text)
+                        try:
+                            # Gemini Call - Updated Model
+                            genai.configure(api_key=GEMINI_KEY)
+                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            
+                            response = model.generate_content(prompts[task])
+                            st.markdown("### 🤖 Results")
+                            st.write(response.text)
+                        except Exception as e:
+                            st.error(f"AI Error: {e}")
                 else:
-                    st.warning("No comments found.")
+                    st.warning("No comments found (or comments disabled).")
             else:
                 st.error("Invalid URL.")
 
