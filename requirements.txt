@@ -1,6 +1,6 @@
 streamlit
 google-api-python-client
-google-generativeai>=0.8.0
+google-generativeai>=0.8.3
 pandas
 plotly
 isodate
