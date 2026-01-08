@@ -76,7 +76,7 @@ def get_recent_videos(channel_handle, api_key, limit=10):
         return videos
     except: return []
 
-# --- AI CORE ---
+# --- AI CORE CON "AUTO-RETRY" (PACIENCIA) ---
 def get_available_model(api_key):
     genai.configure(api_key=api_key)
     try:
@@ -90,17 +90,30 @@ def get_available_model(api_key):
 def generate_ai_response(prompt, api_key, image=None):
     model_name = get_available_model(api_key)
     genai.configure(api_key=api_key)
-    try:
-        model = genai.GenerativeModel(model_name)
-        inputs = [prompt, image] if image else prompt
-        return model.generate_content(inputs).text
-    except Exception as e:
-        return f"⚠️ AI ERROR: {str(e)}"
+    
+    # Intentar hasta 3 veces si sale el error 429
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel(model_name)
+            inputs = [prompt, image] if image else prompt
+            return model.generate_content(inputs).text
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str:
+                # Si es error de cuota, esperar y reintentar
+                wait_time = (attempt + 1) * 5 # Espera 5s, luego 10s...
+                time.sleep(wait_time) 
+                continue 
+            else:
+                # Si es otro error, fallar normal
+                return f"⚠️ AI ERROR: {error_str}"
+    
+    return "⚠️ Quota Exceeded. Please wait 1 minute and try again."
 
 def extract_json_from_ai(text):
     """Extrae JSON limpio de la respuesta de la IA"""
     try:
-        # Busca el primer corchete [ o llave {
         match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
         if match:
             return json.loads(match.group(0))
@@ -188,42 +201,32 @@ def main():
             st.dataframe(pd.DataFrame(vids))
 
     # ==========================================
-    # 6. IDEATION LAB (INTERACTIVE & CLICKABLE)
+    # 6. IDEATION LAB (CLICABLE Y ROBUSTO)
     # ==========================================
     with t6:
         st.header("💡 Ideation Lab (Interactive)")
-        st.markdown("Generates clickable ideas. Click to expand and generate a full 13-25 min structure.")
+        st.markdown("Generates clickable ideas tailored for 13-25 min videos.")
         
         handle = st.text_input("Analyze Handle (e.g. @Sidemen):")
         
-        # Estado para guardar las ideas generadas y no perderlas al clicar
+        # Estado para guardar las ideas
         if "generated_ideas" not in st.session_state:
             st.session_state.generated_ideas = None
 
         if st.button("🚀 Generate 10 Viral Concepts"):
-            with st.spinner("Analyzing channel DNA & Generating Concepts..."):
+            with st.spinner("Analyzing channel DNA..."):
                 vids = get_recent_videos(handle, YT_KEY, limit=10)
                 if vids:
                     titles = "\n".join([v['Title'] for v in vids])
                     
-                    # PROMPT ESPECIAL PARA JSON
                     prompt = f"""
                     {STRATEGIST_PERSONA}
                     Based on these successful titles:
                     {titles}
                     
-                    Generate 10 NEW VIRAL VIDEO IDEAS tailored for this channel.
-                    The format must be a valid JSON LIST of objects.
-                    Each object must have:
-                    - "title": The clickbaity title.
-                    - "hook": A 1-sentence explanation of why it works.
-                    
-                    Example Output format:
-                    [
-                        {{"title": "I Spent 24H in a Freezer", "hook": "High stakes challenge..."}},
-                        {{"title": "Sidemen vs Beta Squad", "hook": "Collab hype..."}}
-                    ]
-                    RETURN ONLY THE JSON.
+                    Generate 10 NEW VIRAL VIDEO IDEAS.
+                    Format: VALID JSON LIST.
+                    Objects: "title", "hook" (why it works).
                     """
                     
                     res = generate_ai_response(prompt, GEMINI_KEY)
@@ -233,41 +236,38 @@ def main():
                         st.session_state.generated_ideas = ideas_json
                         st.success("✅ Ideas generated! Click below to plan them.")
                     else:
-                        st.error("AI returned invalid format. Try again.")
-                        st.write(res) # Debug
+                        st.error("AI format error. Try again.")
                 else:
                     st.error("Channel not found.")
 
-        # RENDERIZADO DE LAS IDEAS CLICKABLES
+        # RENDERIZADO DE LAS IDEAS
         if st.session_state.generated_ideas:
             st.divider()
-            st.subheader("🎬 Select an Idea to Blueprint")
+            st.subheader("🎬 Blueprint Selection")
             
             for i, idea in enumerate(st.session_state.generated_ideas):
-                # Usamos expander para crear el efecto "Menú desplegable"
                 with st.expander(f"📌 {i+1}. {idea.get('title', 'Unknown Title')}"):
-                    st.write(f"**The Hook:** {idea.get('hook', '')}")
+                    st.write(f"**Why it works:** {idea.get('hook', '')}")
                     
-                    # Botón único para cada idea
-                    if st.button(f"⚡ Generate 20-Min Script Structure", key=f"btn_idea_{i}"):
-                        with st.spinner("Architecting the perfect video..."):
+                    if st.button(f"⚡ Generate 15-25 Min Script", key=f"btn_idea_{i}"):
+                        with st.spinner("⏳ Writing Script (this calls AI, please wait)..."):
+                            # Prompt específico para formato largo
                             deep_prompt = f"""
                             {STRATEGIST_PERSONA}
                             
-                            TASK: Create a full production blueprint for a 13-25 minute YouTube video.
-                            
+                            TASK: Create a Production Blueprint for a 15-25 minute YouTube video.
                             TITLE: {idea.get('title')}
-                            CONTEXT: Derived from a high-performance channel analysis.
                             
-                            REQUIREMENTS:
-                            1. **Thumbnail Concept:** Describe the visual.
-                            2. **The Hook (0:00 - 1:30):** Exact scripting for the first minute to max retention.
-                            3. **Pacing Structure (The Meat):** Break down the 15-20 minutes into 3-4 Acts/Segments. 
-                            4. **Retention Spikes:** Where to add tension/twists to prevent drop-off.
-                            5. **Outro/CTA:** Best way to convert subs.
-                            6. **Optimized Description:** First 3 lines for SEO.
+                            STRUCTURE REQUIRED:
+                            1. **Thumbnail & Title:** 3 Variants.
+                            2. **The Hook (0:00 - 1:30):** Script exactly what to say/show to grab retention.
+                            3. **The Setup (1:30 - 3:00):** Context and stakes.
+                            4. **The Meat (Core Content):** Break into 3-4 distinct segments/chapters.
+                            5. **Mid-Video Reset:** A moment to re-engage attention (around 10min mark).
+                            6. **The Payoff/Climax:** Resolving the premise.
+                            7. **Outro:** Optimized for click-through to next video.
                             
-                            Format nicely with Markdown.
+                            Use timestamps (e.g., [05:00]).
                             """
                             
                             script_res = generate_ai_response(deep_prompt, GEMINI_KEY)
