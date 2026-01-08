@@ -173,7 +173,7 @@ def main_app():
                     with st.spinner("Thinking..."):
                         # Gemini Call
                         genai.configure(api_key=GEMINI_KEY)
-                        model = genai.GenerativeModel('gemini-pro')
+                        model = genai.GenerativeModel('model = genai.GenerativeModel('gemini-1.5-flash')
                         
                         context = st.session_state.analytics_data.to_string()
                         full_prompt = (
@@ -272,7 +272,7 @@ def main_app():
                     
                     with st.spinner("Gemini is thinking..."):
                         genai.configure(api_key=GEMINI_KEY)
-                        model = genai.GenerativeModel('gemini-pro')
+                        model = genai.GenerativeModel('gemini-1.5-flash')
                         response = model.generate_content(prompts[task])
                         st.markdown("### 🤖 Results")
                         st.write(response.text)
