@@ -18,20 +18,49 @@ def check_login():
         st.session_state["authenticated"] = False
     if st.session_state["authenticated"]: return True
 
-    st.title("🔒 FrontThree Suite Login")
+    st.title("🔒 Debug Mode Login")
+    
+    # --- ZONA DE DIAGNÓSTICO ---
+    st.write("--- INFO DE SECRETOS ---")
+    try:
+        # 1. Verificar si existen secretos
+        if not st.secrets:
+            st.error("❌ st.secrets está VACÍO. La app no detecta ninguna configuración en la nube.")
+            st.info("Pista: Asegúrate de haber pegado los secretos en 'App Settings > Secrets' y haber guardado.")
+        else:
+            st.success("✅ st.secrets detectado.")
+            # 2. Imprimir las secciones disponibles (sin mostrar contraseñas)
+            st.write(f"Secciones encontradas: {list(st.secrets.keys())}")
+            
+            if "login" in st.secrets:
+                st.write("✅ Sección [login] encontrada.")
+                st.write(f"Claves dentro de login: {list(st.secrets['login'].keys())}")
+            else:
+                st.error("❌ NO se encuentra la sección [login].")
+                st.text("Streamlit ve esto:")
+                st.write(st.secrets)
+
+    except Exception as e:
+        st.error(f"💥 Error crítico leyendo secretos: {e}")
+    # ---------------------------
+
     with st.form("login"):
         user = st.text_input("Username")
         pwd = st.text_input("Password", type="password")
         if st.form_submit_button("Enter"):
             try:
-                # Validate against secrets
-                if user == st.secrets["login"]["username"] and pwd == st.secrets["login"]["password"]:
+                # Intento directo sin try/except genérico
+                real_user = st.secrets["login"]["username"]
+                real_pass = st.secrets["login"]["password"]
+                
+                if user == real_user and password == real_pass:
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
-                    st.error("Access Denied")
-            except:
-                st.error("Secrets not configured correctly.")
+                    st.error(f"❌ Incorrecto. Tú pusiste: '{user}'")
+            except Exception as e:
+                st.error(f"❌ Error al validar: {e}")
+                
     return False
 
 # --- API HELPERS ---
