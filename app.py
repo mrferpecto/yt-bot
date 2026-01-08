@@ -71,16 +71,14 @@ def check_login():
                 st.error("❌ Invalid Credentials")
     return False
 
-# --- MOTOR IA (DEBUG MODE) ---
+# --- MOTOR IA (ROBUSTO) ---
 def generate_ai_response(prompt, api_key, image=None):
     genai.configure(api_key=api_key)
     
-    # Lista de modelos (de más rápido a más potente)
-    # Flash es mucho más barato en cuota que Pro
+    # Lista de modelos prioritaria
     models_to_try = [
         'models/gemini-1.5-flash', 
         'models/gemini-2.0-flash', 
-        'models/gemini-2.5-flash',
         'models/gemini-1.5-pro'
     ]
     
@@ -94,20 +92,24 @@ def generate_ai_response(prompt, api_key, image=None):
         except Exception as e:
             error_msg = str(e)
             last_error = error_msg
-            # Si es cuota (429), esperamos un poco antes de probar otro, 
-            # pero generalmente 429 afecta a todos los modelos a la vez.
+            
+            # Si dice SERVICE_DISABLED, paramos y avisamos al usuario
+            if "SERVICE_DISABLED" in error_msg:
+                return f"⛔ **API DISABLED:** Debes habilitar la 'Generative Language API' en Google Cloud Console para este proyecto."
+            
+            # Si es cuota (429), esperamos un poco
             if "429" in error_msg:
                 time.sleep(1)
                 continue 
             continue
             
-    # Si llegamos aquí, todo falló. Mostramos el error REAL.
+    # Mensaje de error final detallado
     if "429" in last_error:
-        return f"⛔ **GOOGLE QUOTA EXCEEDED:** Estás usando la API demasiado rápido. Google ha pausado tu acceso temporalmente. **Espera 1-2 minutos** y vuelve a probar."
-    elif "404" in last_error:
-        return f"❌ **Model Error:** Tu clave API no tiene acceso a los modelos solicitados. Verifica Google AI Studio."
+        return "⛔ **GOOGLE QUOTA EXCEEDED:** Demasiadas peticiones. Espera 1 minuto."
+    elif "403" in last_error:
+        return "❌ **API Permission Error:** Revisa que la API esté habilitada en Google Cloud."
     else:
-        return f"❌ **API Error:** {last_error}"
+        return f"❌ **Error:** {last_error}"
 
 def extract_json_from_ai(text):
     try:
@@ -131,7 +133,7 @@ def get_channel_id(handle, api_key):
     except: return None
 
 @st.cache_data(ttl=3600) 
-def get_recent_videos(channel_handle, api_key, limit=15):
+def get_recent_videos(channel_handle, api_key, limit=10):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
         ch_id = get_channel_id(channel_handle, api_key)
@@ -199,19 +201,19 @@ def tab_channel_analyzer(api_key):
             df = pd.read_csv(uploaded_file)
             
             # --- FIX TYPE ERROR (BLINDADO) ---
-            # 1. Eliminar filas totalmente vacías
             df.dropna(how='all', inplace=True)
-            
-            # 2. Convertir columnas clave a tipos seguros
             for col in df.columns:
+                # Convertir todo lo que parezca texto a string real
+                if df[col].dtype == 'object':
+                    df[col] = df[col].astype(str)
+                
                 col_lower = col.lower()
-                if "title" in col_lower or "título" in col_lower:
-                    df[col] = df[col].astype(str).fillna("")
-                elif any(x in col_lower for x in ["views", "ctr", "duration", "likes", "impressions"]):
+                # Intentar convertir métricas a números
+                if any(x in col_lower for x in ["views", "ctr", "duration", "likes", "impressions"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # Preparar muestra para la IA
-            data_sample = df.head(50).to_csv(index=False) # Reducido a 50 para ahorrar tokens
+            # Muestra reducida para la IA
+            data_sample = df.head(40).to_csv(index=False)
             
             prompt = f"""
             {STRATEGIST_PERSONA}
@@ -279,11 +281,9 @@ def tab_metadata_analyzer(api_key):
                     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 10])), showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Limpiar JSON del texto si se muestra
+                # Clean text display
                 clean_text = res
-                if "{" in res and "}" in res:
-                    clean_text = re.sub(r'\{.*?\}', '', res, flags=re.DOTALL)
-                
+                if "{" in res: clean_text = re.sub(r'\{.*?\}', '', res, flags=re.DOTALL)
                 st.write(clean_text)
 
 def tab_engagement_room(api_key):
@@ -332,14 +332,13 @@ def tab_competitor_analysis(api_key):
                 with c2:
                     fig2 = px.scatter(df, x="Views", y="Likes", size="Comments", color="Competitor", hover_name="Title")
                     st.plotly_chart(fig2, use_container_width=True)
-            else: st.warning("No data found (API Quota might be hit).")
+            else: st.warning("No data found.")
 
 def tab_ideation(api_key):
     st.header("💡 Ideation Lab")
     handle = st.text_input("Handle (e.g. @Sidemen):")
     if st.button("Generate Ideas"):
         with st.spinner("Thinking..."):
-            # Límite reducido a 10 para ahorrar cuota
             vids = get_recent_videos(handle, api_key, limit=10)
             if vids:
                 titles = "\n".join([v['Title'] for v in vids])
