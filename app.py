@@ -14,7 +14,7 @@ import json
 from datetime import datetime
 from PIL import Image
 
-# Configuración visual segura
+# Configuración visual segura (no rompe si falta librería)
 try:
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
@@ -39,15 +39,15 @@ COMPETITORS = {
     "Danny Aarons": "DannyAarons", "Girth N Turf": "GirthNTurf", "Sharky": "Sharky", "Chunkz": "Chunkz"
 }
 
-# --- PERSONA QUIRÚRGICA ---
+# --- PERSONA DE ANALISTA (CORTA Y DIRECTA) ---
 STRATEGIST_PERSONA = """
-Role: Senior YouTube Strategist.
-Tone: Surgical, Brutally Direct, No Fluff.
+Role: Senior Data Strategist.
+Tone: Surgical, Direct, No Fluff.
 Rules:
-1. NO INTROS. Start directly with the insight.
-2. Be specific ("Switch red font to yellow").
-3. Max 300 words. Bullet points only.
-4. If analysing retention, correlate it with the topic/hook.
+1. NO INTRODUCTIONS ("Based on the data..."). Start directly with the insight.
+2. Group by: "Winning Patterns", "Losing Patterns", "Outliers".
+3. Use Bullet Points.
+4. Max 300 words.
 """
 
 # --- LOGIN ---
@@ -58,7 +58,6 @@ def check_login():
 
     st.title("🔒 Front Three's AI Studio")
     
-    # Verificación silenciosa de secretos
     try:
         real_user = st.secrets["login"]["username"]
         real_pass = st.secrets["login"]["password"]
@@ -77,41 +76,35 @@ def check_login():
                 st.error("❌ Invalid Credentials")
     return False
 
-# --- AI CORE (AUTO-DETECT) ---
-def get_best_available_model(api_key):
-    genai.configure(api_key=api_key)
-    try:
-        # Preguntar a la cuenta qué modelos tiene
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Lista de preferencia (Nuevos -> Viejos)
-        priority_list = [
-            'models/gemini-2.5-flash', 
-            'models/gemini-2.0-flash', 
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-pro'
-        ]
-        
-        for p in priority_list:
-            if p in available_models: return p
-            
-        # Si no, devolver el primero disponible
-        return available_models[0] if available_models else None
-    except: return None
-
+# --- MOTOR IA (ARREGLO ERROR "NO MODELS") ---
 def generate_ai_response(prompt, api_key, image=None):
     genai.configure(api_key=api_key)
-    model_name = get_best_available_model(api_key)
     
-    if not model_name: return "❌ AI Error: No models found/authorized."
+    # Lista de modelos a probar en orden. 
+    # Esto soluciona tu error: ya no pregunta qué modelos hay, prueba estos directamente.
+    models_to_try = [
+        'models/gemini-2.5-flash', # Prioridad 1
+        'models/gemini-2.0-flash', # Prioridad 2
+        'models/gemini-1.5-flash', # Prioridad 3
+        'models/gemini-1.5-pro'    # Prioridad 4
+    ]
+    
+    inputs = [prompt, image] if image else prompt
 
-    try:
-        model = genai.GenerativeModel(model_name)
-        inputs = [prompt, image] if image else prompt
-        return model.generate_content(inputs).text
-    except Exception as e:
-        if "429" in str(e): return "⚠️ Tráfico Alto (Quota Limit). Espera 30s."
-        return f"AI Error ({model_name}): {e}"
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            return model.generate_content(inputs).text
+        except Exception as e:
+            error_msg = str(e)
+            # Si es error de cuota, espera y sigue
+            if "429" in error_msg:
+                time.sleep(2)
+                continue
+            # Si es error de modelo (404), prueba el siguiente
+            continue
+            
+    return "❌ Critical AI Error: All models failed. Check API Key quota."
 
 def extract_json_from_ai(text):
     try:
@@ -126,47 +119,7 @@ def download_image_from_url(url):
         return Image.open(io.BytesIO(resp.content))
     except: return None
 
-# --- YOUTUBE API (HYBRID SEARCH) ---
-def get_video_id_by_title(title, api_key):
-    """Busca video por título. Maneja errores si no encuentra nada."""
-    if not title or pd.isna(title): return None
-    youtube = build('youtube', 'v3', developerKey=api_key)
-    try:
-        # Busca solo en videos para ser más preciso
-        search_response = youtube.search().list(
-            q=str(title), 
-            part="id", 
-            maxResults=1, 
-            type="video"
-        ).execute()
-        
-        if search_response['items']:
-            return search_response['items'][0]['id']['videoId']
-    except: return None
-    return None
-
-def get_deep_video_details(video_id, api_key):
-    if not video_id: return None
-    youtube = build('youtube', 'v3', developerKey=api_key)
-    try:
-        vid_req = youtube.videos().list(part="snippet,statistics", id=video_id).execute()
-        if not vid_req['items']: return None
-        item = vid_req['items'][0]
-        
-        comments = []
-        try:
-            c_req = youtube.commentThreads().list(part="snippet", videoId=video_id, maxResults=10, textFormat="plainText", order="relevance").execute()
-            comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in c_req['items']]
-        except: comments = ["Comments disabled/Hidden"]
-        
-        return {
-            "Title": item['snippet']['title'],
-            "Tags": item['snippet'].get('tags', []),
-            "Comments Sample": comments
-        }
-    except: return None
-
-# --- GENERAL API UTILS ---
+# --- YOUTUBE API UTILS ---
 def get_channel_id(handle, api_key):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
@@ -204,94 +157,66 @@ def get_recent_videos(channel_handle, api_key, limit=20):
         return videos
     except: return []
 
+def get_deep_video_details(video_id, api_key):
+    if not video_id: return None
+    youtube = build('youtube', 'v3', developerKey=api_key)
+    try:
+        vid_req = youtube.videos().list(part="snippet,statistics", id=video_id).execute()
+        if not vid_req['items']: return None
+        item = vid_req['items'][0]
+        comments = []
+        try:
+            c_req = youtube.commentThreads().list(part="snippet", videoId=video_id, maxResults=10, textFormat="plainText", order="relevance").execute()
+            comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in c_req['items']]
+        except: comments = ["Comments disabled"]
+        
+        return {
+            "Title": item['snippet']['title'],
+            "Tags": item['snippet'].get('tags', []),
+            "Comments Sample": comments
+        }
+    except: return None
+
 # --- TABS ---
 
 def tab_channel_analyzer(api_key):
-    st.header("📊 Channel Analyzer (Hybrid Engine)")
-    st.info("Subida de CSV + Búsqueda Live en YouTube (Top 3 / Flop 3).")
+    st.header("📊 Channel Pattern Recognition")
+    st.info("Upload CSV. General Pattern Analysis (No API Limits).")
     
     uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
     
-    if uploaded_file and st.button("🧠 Run Hybrid Analysis"):
+    if uploaded_file and st.button("🧠 Find Patterns"):
         try:
             df = pd.read_csv(uploaded_file)
             
-            # Limpieza de nombres de columnas
-            possible_title_cols = [c for c in df.columns if 'title' in c.lower() or 'título' in c.lower()]
-            possible_view_cols = [c for c in df.columns if 'views' in c.lower() or 'visualizaciones' in c.lower()]
-            
-            if not possible_title_cols or not possible_view_cols:
-                st.error("Error CSV: No se encuentran columnas de 'Title' o 'Views'.")
-                return
+            # Limpieza robusta
+            for col in df.columns:
+                if "title" in col.lower(): df[col] = df[col].astype(str)
+                if any(x in col.lower() for x in ["views", "ctr", "duration"]):
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            title_col = possible_title_cols[0]
-            view_col = possible_view_cols[0]
+            data_sample = df.head(60).to_csv(index=False)
+            stats_summary = df.describe().to_string()
             
-            # Limpiar datos nulos y asegurar tipos
-            df = df.dropna(subset=[title_col, view_col])
-            df[view_col] = pd.to_numeric(df[view_col], errors='coerce').fillna(0)
-            
-            # Top y Flop
-            df_sorted = df.sort_values(by=view_col, ascending=False)
-            top_3 = df_sorted.head(3)
-            flop_3 = df_sorted.tail(3)
-            targets = pd.concat([top_3, flop_3])
-            
-            enriched_data = []
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            total_items = len(targets)
-            
-            for i, (index, row) in enumerate(targets.iterrows()):
-                # FIX: Convertir explícitamente a string para evitar TypeError
-                title = str(row[title_col])
-                views = row[view_col]
-                
-                status_text.text(f"🛰️ Deep Scanning: {title[:40]}...")
-                
-                # Pausa para evitar error 429
-                time.sleep(1.5) 
-                
-                vid_id = get_video_id_by_title(title, api_key)
-                live_data = None
-                
-                if vid_id:
-                    live_data = get_deep_video_details(vid_id, api_key)
-                
-                enriched_data.append({
-                    "CSV_Title": title,
-                    "CSV_Views": views,
-                    "Live_Comments": live_data['Comments Sample'] if live_data else "N/A",
-                    "Status": "Top Performer" if i < 3 else "Underperformer"
-                })
-                
-                progress_bar.progress((i + 1) / total_items)
-                
-            progress_bar.empty()
-            status_text.empty()
-            
-            # Prompt Quirúrgico
             prompt = f"""
             {STRATEGIST_PERSONA}
             
-            TASK: Hybrid Analysis (CSV Metrics + Live Audience Sentiment).
-            DEEP DATA SET:
-            {json.dumps(enriched_data, indent=2)}
+            TASK: General Pattern Analysis (Shorts vs Longs).
+            STATS: {stats_summary}
+            DATA SAMPLE: {data_sample}
             
             OUTPUT:
-            1. 🟢 **WINNING FORMULA:** (Correlate Views with Comment Sentiment).
-            2. 🔴 **FLOP DIAGNOSIS:** (Why did they fail?).
-            3. ⚡ **3 SURGICAL ACTIONS:** Specific changes for next upload.
+            1. **Winning Formats:** What works?
+            2. **Topic Clusters:** Keywords driving views.
+            3. **Outliers:** Specific videos that broke the norm.
             """
             
-            with st.spinner("Synthesizing Report..."):
+            with st.spinner("Analyzing..."):
                 res = generate_ai_response(prompt, api_key)
                 st.markdown(res)
                 
         except Exception as e:
-            st.error(f"Error procesando el archivo: {e}")
+            st.error(f"Error processing CSV: {e}")
 
 def tab_downloader():
     st.header("📥 Downloader")
@@ -334,7 +259,7 @@ def tab_metadata_analyzer(api_key):
         st.image(img, width=350)
         if st.button("🎯 Rate Thumbnail"):
             with st.spinner("Auditing..."):
-                prompt = f"{STRATEGIST_PERSONA}\nRate thumbnail 0-10. JSON: {{'Legibility':0, 'Emotion':0, 'Contrast':0, 'Curiosity':0}}\nShort specific critique."
+                prompt = f"{STRATEGIST_PERSONA}\nRate thumbnail 0-10. JSON Output: {{'Legibility':0, 'Emotion':0, 'Contrast':0}}\nShort critique."
                 res = generate_ai_response(prompt, api_key, img)
                 data = extract_json_from_ai(res)
                 if data:
@@ -364,7 +289,7 @@ def tab_engagement_room(api_key):
                     if s_data:
                         fig = px.pie(values=list(s_data.values()), names=list(s_data.keys()), hole=0.5, color_discrete_sequence=px.colors.sequential.RdBu)
                         st.plotly_chart(fig, use_container_width=True)
-                    st.write(generate_ai_response(f"Specific insights from comments: {text[:1000]}", api_key))
+                    st.write(generate_ai_response(f"Insights from comments: {text[:1000]}", api_key))
                 else: st.error("No comments found.")
 
 def tab_competitor_analysis(api_key):
@@ -402,7 +327,7 @@ def tab_ideation(api_key):
                 prompt = f"{STRATEGIST_PERSONA}\nBased on:\n{titles}\nGenerate 10 VIRAL IDEAS."
                 res = generate_ai_response(prompt, api_key)
                 st.markdown(res)
-            else: st.error("Channel not found.")
+            else: st.error("Channel not found. Try searching channel name if handle fails.")
 
 # --- MAIN ---
 def main():
