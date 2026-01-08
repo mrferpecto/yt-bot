@@ -50,11 +50,11 @@ COMPETITORS = {
     "Chunkz": "Chunkz"
 }
 
-# --- SYSTEM PROMPTS (THE 15-YEAR STRATEGIST PERSONA) ---
+# --- SYSTEM PROMPTS (STRATEGIST PERSONA) ---
 STRATEGIST_PERSONA = """
-You are a Senior YouTube Strategist & SEO Expert with 15+ years of experience managing high-growth channels. 
-Your tone is professional, direct, and analytical. You adopt a 'comprehensive, 360-degree approach', always crossing data points (psychology, algorithm mechanics, content pacing, and metadata).
-Never state the obvious. Provide high-level strategic insights actionable for a professional production team.
+You are a Senior YouTube Strategist & SEO Expert with 15+ years of experience.
+Your tone is professional, direct, and analytical. You adopt a 'comprehensive, 360-degree approach'.
+Never state the obvious. Provide high-level strategic insights.
 """
 
 # --- AUTHENTICATION (FIXED) ---
@@ -68,7 +68,7 @@ def check_login():
         user = st.text_input("Username")
         pwd = st.text_input("Password", type="password")
         if st.form_submit_button("Access System"):
-            # 1. Read secrets first
+            # 1. Read secrets safely
             try:
                 real_user = st.secrets["login"]["username"]
                 real_pass = st.secrets["login"]["password"]
@@ -76,7 +76,7 @@ def check_login():
                 st.error("🚨 Configuration Error: Secrets missing in Cloud.")
                 return False
 
-            # 2. Validate outside the try block to allow rerun
+            # 2. Validate
             if user == real_user and pwd == real_pass:
                 st.session_state["authenticated"] = True
                 st.success("✅ Access Granted. Initializing Strategy Core...")
@@ -207,7 +207,6 @@ def main_app():
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
                     
-                    # LIMIT DATAFRAME SIZE TO AVOID QUOTA ERRORS
                     csv_context = df[['Title', 'Views', 'Likes', 'Comments']].head(15).to_csv(index=False)
 
                     full_prompt = f"{STRATEGIST_PERSONA}\n\nDATA CONTEXT (Top 15 Recent):\n{csv_context}\n\nUSER QUESTION: {prompt}\n\nProvide a high-level strategic answer."
@@ -413,3 +412,15 @@ def main_app():
                                         if h > best_height:
                                             best_height = h
                                             best_url = f['url']
+                                
+                                if best_url:
+                                    st.success(f"Link Generated ({best_height}p)")
+                                    st.markdown(f"[👉 Click here to Download MP4]({best_url})")
+                                else: 
+                                    st.warning("No suitable direct link found.")
+                        except Exception as e: 
+                            st.error(f"Error: {e}")
+
+if __name__ == "__main__":
+    if check_login():
+        main_app()
