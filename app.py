@@ -14,7 +14,7 @@ import json
 from datetime import datetime
 from PIL import Image
 
-# Manejo seguro de librerías visuales extra
+# Configuración segura de librerías visuales
 try:
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
@@ -22,10 +22,10 @@ try:
 except ImportError:
     WORDCLOUD_AVAILABLE = False
 
-# --- CONFIGURATION ---
+# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Front Three's AI Studio", page_icon="⚡", layout="wide")
 
-# --- COMPETITOR DATABASE ---
+# --- DATABASE ---
 COMPETITORS = {
     "Sidemen": "Sidemen", "Beta Squad": "BetaSquad", "The Overlap": "TheOverlap",
     "Ben Foster": "BenFosterTheCyclingGK", "Pitch Side": "PitchSide", "FilthyFellas": "FilthyFellas",
@@ -39,14 +39,13 @@ COMPETITORS = {
     "Danny Aarons": "DannyAarons", "Girth N Turf": "GirthNTurf", "Sharky": "Sharky", "Chunkz": "Chunkz"
 }
 
-# --- STRATEGIST PERSONA ---
 STRATEGIST_PERSONA = """
 You are a Senior YouTube Strategist (15+ years exp). 
 Tone: Professional, Analytical.
 Focus: Differentiate Shorts (velocity, loop) vs Longform (retention, story).
 """
 
-# --- AUTHENTICATION ---
+# --- LOGIN ---
 def check_login():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -67,34 +66,49 @@ def check_login():
             except: st.error("🚨 Secrets Config Error")
     return False
 
-# --- ROBUST AI WRAPPER (ANTI-CRASH) ---
+# --- AI CORE (AUTO-DETECT MODEL) ---
+def get_best_available_model(api_key):
+    """Busca qué modelo tienes activado en tu cuenta para evitar errores 404."""
+    genai.configure(api_key=api_key)
+    try:
+        # Listamos los modelos de tu cuenta
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Prioridad: Los más nuevos y rápidos primero
+        priority_list = [
+            'models/gemini-2.5-flash', # El más nuevo (según tu captura)
+            'models/gemini-2.0-flash', 
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-pro'
+        ]
+        
+        for p in priority_list:
+            if p in available_models:
+                return p
+        
+        # Si no encuentra ninguno de la lista, coge el primero que haya
+        return available_models[0] if available_models else None
+    except:
+        return None
+
 def generate_ai_response(prompt, api_key, image=None):
     genai.configure(api_key=api_key)
     
-    # Lista de modelos a probar en orden de prioridad (Rápido -> Potente -> Estable)
-    models_to_try = [
-        'gemini-1.5-flash', 
-        'gemini-2.0-flash', 
-        'gemini-1.5-pro'
-    ]
+    # 1. Detectar el mejor modelo disponible
+    model_name = get_best_available_model(api_key)
     
-    inputs = [prompt, image] if image else prompt
+    if not model_name:
+        return "❌ Error: No AI models found in your Google Account."
 
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            return model.generate_content(inputs).text
-        except Exception as e:
-            error_msg = str(e)
-            # Si es error de cuota (429), esperamos un poco y probamos el siguiente
-            if "429" in error_msg or "Quota" in error_msg:
-                time.sleep(2) 
-                continue # Probar siguiente modelo
-            # Si es error de modelo no encontrado (404), probamos el siguiente
-            if "404" in error_msg:
-                continue
-    
-    return "⚠️ AI Error: All models failed or Quota exceeded. Please wait a minute."
+    try:
+        model = genai.GenerativeModel(model_name)
+        inputs = [prompt, image] if image else prompt
+        return model.generate_content(inputs).text
+    except Exception as e:
+        error_msg = str(e)
+        if "429" in error_msg or "Quota" in error_msg:
+            return "⚠️ **Tráfico Alto (Límite Gratuito):** Espera 30 segundos y vuelve a intentar."
+        return f"AI Error ({model_name}): {error_msg}"
 
 def extract_json_from_ai(text):
     try:
@@ -109,7 +123,7 @@ def download_image_from_url(url):
         return Image.open(io.BytesIO(resp.content))
     except: return None
 
-# --- YOUTUBE DATA FUNCTIONS ---
+# --- YOUTUBE API ---
 def get_channel_id(handle, api_key):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
@@ -175,73 +189,57 @@ def get_video_deep_data(url, api_key):
         }
     except: return None
 
-# --- APP TABS ---
+# --- TABS ---
 
 def tab_channel_analyzer(api_key):
     st.header("📊 Channel Analyzer (CSV Import)")
-    st.info("Upload YouTube Studio Export to visualize Retention & Funnels.")
+    st.info("Sube el CSV exportado de YouTube Studio.")
     
     uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
         
-        # 1. FUNNEL VISUAL
-        col1, col2 = st.columns([2, 1])
-        with col1:
+        c1, c2 = st.columns([2, 1])
+        with c1:
             if 'Impressions' in df.columns and 'Views' in df.columns:
                 st.subheader("🔻 Conversion Funnel")
                 imps = df['Impressions'].sum()
                 views = df['Views'].sum()
                 likes = df['Likes'].sum() if 'Likes' in df.columns else (views * 0.04)
-                
                 fig = px.funnel(dict(number=[imps, views, likes], stage=["Impressions", "Views", "Engagements"]), x='number', y='stage')
                 st.plotly_chart(fig, use_container_width=True)
         
-        with col2:
-            st.markdown("### Quick Stats")
+        with c2:
             st.metric("Total Views", f"{df['Views'].sum():,}" if 'Views' in df.columns else "N/A")
-            st.metric("Avg CTR", f"{df['Impressions click-through rate (%)'].mean():.2f}%" if 'Impressions click-through rate (%)' in df.columns else "N/A")
 
-        # 2. AI ANALYSIS
         if st.button("🧠 Run Strategic Analysis"):
-            with st.spinner("Analyzing CSV data..."):
+            with st.spinner("Analyzing..."):
                 prompt = f"{STRATEGIST_PERSONA}\nAnalyze this channel data trends:\n{df.head(20).to_csv()}"
                 res = generate_ai_response(prompt, api_key)
                 st.markdown(res)
 
 def tab_downloader():
-    st.header("📥 Downloader (Split Mode)")
-    st.markdown("Choose what you want to download below.")
+    st.header("📥 Downloader")
     url = st.text_input("Paste YouTube URL:", placeholder="https://youtube.com/watch?v=...")
     
     if url:
         vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
         if vid_match:
             vid_id = vid_match.group(1)
-            
-            # Layout de 2 columnas CLARAS
             c1, c2 = st.columns(2)
             
-            # --- COLUMNA 1: THUMBNAIL ---
             with c1:
-                st.info("🖼️ **IMAGE OPTION**")
+                st.info("🖼️ **THUMBNAIL**")
                 img_url = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
-                try:
-                    resp = requests.get(img_url)
-                    if resp.status_code == 200:
-                        st.image(resp.content, use_container_width=True)
-                        st.download_button("⬇️ Download JPG", resp.content, file_name=f"{vid_id}.jpg", mime="image/jpeg", use_container_width=True)
-                    else:
-                        st.warning("MaxRes Thumb not found.")
-                except: st.error("Error fetching image.")
+                st.image(img_url, use_container_width=True)
+                # Hack simple para descargar imagen sin request extra si falla
+                st.markdown(f"[⬇️ Download JPG]({img_url})")
 
-            # --- COLUMNA 2: VIDEO ---
             with c2:
-                st.success("🎥 **VIDEO OPTION**")
-                if st.button("Generate 720p Video Link", use_container_width=True):
+                st.success("🎥 **VIDEO**")
+                if st.button("Generate Video Link", use_container_width=True):
                     with st.spinner("Processing..."):
                         try:
-                            # Android User Agent to bypass 403
                             ydl_opts = {
                                 'quiet': True,
                                 'format': 'best[height<=720][ext=mp4]/best[ext=mp4]',
@@ -254,13 +252,12 @@ def tab_downloader():
                             st.error(f"Error: {e}")
 
 def tab_metadata_analyzer(api_key):
-    st.header("👁️ Metadata & Thumbnail Audit")
-    
+    st.header("👁️ Metadata Audit")
     c1, c2 = st.columns(2)
     img = None
     
     with c1:
-        u = st.text_input("YouTube URL (for thumbnail):")
+        u = st.text_input("YouTube URL:")
         if u:
             vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", u)
             if vid_match:
@@ -275,23 +272,16 @@ def tab_metadata_analyzer(api_key):
             with st.spinner("AI Auditing..."):
                 prompt = f"""
                 {STRATEGIST_PERSONA}
-                Rate thumbnail 0-10 on metrics. Output JSON: {{"Legibility": 0, "Emotion": 0, "Contrast": 0, "Curiosity": 0, "Branding": 0}}
+                Rate thumbnail 0-10. Output JSON: {{"Legibility": 0, "Emotion": 0, "Contrast": 0, "Curiosity": 0, "Branding": 0}}
                 Then add summary.
                 """
                 res = generate_ai_response(prompt, api_key, img)
-                
-                # Visual Chart
                 data = extract_json_from_ai(res)
                 if data:
-                    fig = go.Figure(data=go.Scatterpolar(
-                        r=list(data.values()), theta=list(data.keys()), fill='toself'
-                    ))
+                    fig = go.Figure(data=go.Scatterpolar(r=list(data.values()), theta=list(data.keys()), fill='toself'))
                     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 10])), showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
-                
-                # Show text
-                clean_text = res.replace("{", "").replace("}", "") if data else res
-                st.write(clean_text)
+                st.write(res.replace("{", "").replace("}", "") if data else res)
 
 def tab_engagement_room(api_key):
     st.header("💬 Engagement Visualizer")
@@ -303,7 +293,6 @@ def tab_engagement_room(api_key):
             if data and data['comments']:
                 text = " ".join(data['comments'])
                 
-                # 1. WORDCLOUD
                 if WORDCLOUD_AVAILABLE:
                     st.subheader("☁️ Word Cloud")
                     wc = WordCloud(width=800, height=300, background_color='black', colormap='viridis').generate(text)
@@ -312,7 +301,6 @@ def tab_engagement_room(api_key):
                     ax.axis("off")
                     st.pyplot(fig)
                 
-                # 2. SENTIMENT
                 prompt = f"""Analyze comments: "{text[:1500]}..." Output JSON: {{"Positive": 0, "Neutral": 0, "Negative": 0}}"""
                 res = generate_ai_response(prompt, api_key)
                 s_data = extract_json_from_ai(res)
@@ -322,17 +310,17 @@ def tab_engagement_room(api_key):
                     fig = px.pie(values=list(s_data.values()), names=list(s_data.keys()), hole=0.5, color_discrete_sequence=px.colors.sequential.RdBu)
                     st.plotly_chart(fig, use_container_width=True)
                 
-                st.markdown("### 🧠 Strategist Insights")
-                st.write(generate_ai_response(f"Summarize main topics and sentiment: {text[:1500]}", api_key))
+                st.markdown("### 🧠 Insights")
+                st.write(generate_ai_response(f"Summarize sentiment: {text[:1500]}", api_key))
             else:
-                st.error("No comments found or API error.")
+                st.error("No comments found.")
 
 def tab_competitor_analysis(api_key):
     st.header("⚔️ Competitor Heatmaps")
     sel = st.multiselect("Select Rivals:", list(COMPETITORS.keys()), default=["Sidemen"], max_selections=3)
     
     if st.button("Generate Intelligence"):
-        with st.spinner("Scouting (Using Cached Data)..."):
+        with st.spinner("Scouting..."):
             all_vids = []
             for name in sel:
                 vids = get_recent_videos(COMPETITORS[name], api_key, limit=20)
@@ -348,7 +336,7 @@ def tab_competitor_analysis(api_key):
                 c1, c2 = st.columns(2)
                 with c1:
                     st.subheader("🔥 Upload Heatmap")
-                    fig = px.density_heatmap(df, x="Hour", y="Day", z="Views", color_continuous_scale="Magma", title="Best Upload Times")
+                    fig = px.density_heatmap(df, x="Hour", y="Day", z="Views", color_continuous_scale="Magma")
                     st.plotly_chart(fig, use_container_width=True)
                 
                 with c2:
@@ -356,17 +344,17 @@ def tab_competitor_analysis(api_key):
                     fig2 = px.scatter(df, x="Views", y="Likes", size="Comments", color="Competitor", hover_name="Title")
                     st.plotly_chart(fig2, use_container_width=True)
             else:
-                st.warning("No data found. API quota might be exhausted.")
+                st.warning("No data found.")
 
 def tab_ideation(api_key):
     st.header("💡 Ideation Lab")
     handle = st.text_input("Analyze Channel Handle (e.g. @Sidemen):")
-    if st.button("Generate 20 Ideas"):
+    if st.button("Generate Ideas"):
         with st.spinner("Thinking..."):
             vids = get_recent_videos(handle, api_key, limit=10)
             if vids:
                 titles = "\n".join([v['Title'] for v in vids])
-                prompt = f"{STRATEGIST_PERSONA}\nBased on these recent videos:\n{titles}\nGenerate 20 NEW VIRAL IDEAS."
+                prompt = f"{STRATEGIST_PERSONA}\nBased on these recent videos:\n{titles}\nGenerate 10 NEW VIRAL IDEAS."
                 res = generate_ai_response(prompt, api_key)
                 st.markdown(res)
             else:
