@@ -14,16 +14,16 @@ import json
 from datetime import datetime
 from PIL import Image
 
-# Configuración visual segura (no rompe si falta librería)
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Front Three's AI Studio", page_icon="⚡", layout="wide")
+
+# --- LIBRERÍAS VISUALES ---
 try:
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
     WORDCLOUD_AVAILABLE = True
 except ImportError:
     WORDCLOUD_AVAILABLE = False
-
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Front Three's AI Studio", page_icon="⚡", layout="wide")
 
 # --- DATABASE ---
 COMPETITORS = {
@@ -39,15 +39,11 @@ COMPETITORS = {
     "Danny Aarons": "DannyAarons", "Girth N Turf": "GirthNTurf", "Sharky": "Sharky", "Chunkz": "Chunkz"
 }
 
-# --- PERSONA DE ANALISTA (CORTA Y DIRECTA) ---
+# --- PERSONA ---
 STRATEGIST_PERSONA = """
-Role: Senior Data Strategist.
-Tone: Surgical, Direct, No Fluff.
-Rules:
-1. NO INTRODUCTIONS ("Based on the data..."). Start directly with the insight.
-2. Group by: "Winning Patterns", "Losing Patterns", "Outliers".
-3. Use Bullet Points.
-4. Max 300 words.
+Role: Senior YouTube Strategist.
+Tone: Direct, Surgical, High-Value.
+Instructions: No intro/outro. Bullet points only. Focus on patterns.
 """
 
 # --- LOGIN ---
@@ -57,12 +53,11 @@ def check_login():
     if st.session_state["authenticated"]: return True
 
     st.title("🔒 Front Three's AI Studio")
-    
     try:
         real_user = st.secrets["login"]["username"]
         real_pass = st.secrets["login"]["password"]
     except:
-        st.error("🚨 Error: Secretos no configurados.")
+        st.error("🚨 Error: Secrets no configurados en Streamlit Cloud.")
         return False
 
     with st.form("login"):
@@ -76,20 +71,21 @@ def check_login():
                 st.error("❌ Invalid Credentials")
     return False
 
-# --- MOTOR IA (ARREGLO ERROR "NO MODELS") ---
+# --- MOTOR IA (DEBUG MODE) ---
 def generate_ai_response(prompt, api_key, image=None):
     genai.configure(api_key=api_key)
     
-    # Lista de modelos a probar en orden. 
-    # Esto soluciona tu error: ya no pregunta qué modelos hay, prueba estos directamente.
+    # Lista de modelos (de más rápido a más potente)
+    # Flash es mucho más barato en cuota que Pro
     models_to_try = [
-        'models/gemini-2.5-flash', # Prioridad 1
-        'models/gemini-2.0-flash', # Prioridad 2
-        'models/gemini-1.5-flash', # Prioridad 3
-        'models/gemini-1.5-pro'    # Prioridad 4
+        'models/gemini-1.5-flash', 
+        'models/gemini-2.0-flash', 
+        'models/gemini-2.5-flash',
+        'models/gemini-1.5-pro'
     ]
     
     inputs = [prompt, image] if image else prompt
+    last_error = ""
 
     for model_name in models_to_try:
         try:
@@ -97,14 +93,21 @@ def generate_ai_response(prompt, api_key, image=None):
             return model.generate_content(inputs).text
         except Exception as e:
             error_msg = str(e)
-            # Si es error de cuota, espera y sigue
+            last_error = error_msg
+            # Si es cuota (429), esperamos un poco antes de probar otro, 
+            # pero generalmente 429 afecta a todos los modelos a la vez.
             if "429" in error_msg:
-                time.sleep(2)
-                continue
-            # Si es error de modelo (404), prueba el siguiente
+                time.sleep(1)
+                continue 
             continue
             
-    return "❌ Critical AI Error: All models failed. Check API Key quota."
+    # Si llegamos aquí, todo falló. Mostramos el error REAL.
+    if "429" in last_error:
+        return f"⛔ **GOOGLE QUOTA EXCEEDED:** Estás usando la API demasiado rápido. Google ha pausado tu acceso temporalmente. **Espera 1-2 minutos** y vuelve a probar."
+    elif "404" in last_error:
+        return f"❌ **Model Error:** Tu clave API no tiene acceso a los modelos solicitados. Verifica Google AI Studio."
+    else:
+        return f"❌ **API Error:** {last_error}"
 
 def extract_json_from_ai(text):
     try:
@@ -119,7 +122,7 @@ def download_image_from_url(url):
         return Image.open(io.BytesIO(resp.content))
     except: return None
 
-# --- YOUTUBE API UTILS ---
+# --- YOUTUBE API ---
 def get_channel_id(handle, api_key):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
@@ -128,17 +131,19 @@ def get_channel_id(handle, api_key):
     except: return None
 
 @st.cache_data(ttl=3600) 
-def get_recent_videos(channel_handle, api_key, limit=20):
+def get_recent_videos(channel_handle, api_key, limit=15):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
         ch_id = get_channel_id(channel_handle, api_key)
         if not ch_id: return []
+        
         ch_req = youtube.channels().list(part="contentDetails", id=ch_id).execute()
         uploads_id = ch_req['items'][0]['contentDetails']['relatedPlaylists']['uploads']
         
         videos = []
         pl_req = youtube.playlistItems().list(part="contentDetails", playlistId=uploads_id, maxResults=limit).execute()
         vid_ids = [x['contentDetails']['videoId'] for x in pl_req['items']]
+        
         vid_req = youtube.videos().list(part="snippet,statistics,contentDetails", id=",".join(vid_ids)).execute()
         
         for v in vid_req['items']:
@@ -152,28 +157,32 @@ def get_recent_videos(channel_handle, api_key, limit=20):
                 "Likes": int(v['statistics'].get('likeCount', 0)),
                 "Comments": int(v['statistics'].get('commentCount', 0)),
                 "Type": "Short" if seconds <= 60 else "Longform",
+                "Description": v['snippet']['description'],
+                "Thumbnail": v['snippet']['thumbnails']['high']['url'],
                 "Competitor": channel_handle 
             })
         return videos
     except: return []
 
-def get_deep_video_details(video_id, api_key):
-    if not video_id: return None
+def get_video_deep_data(url, api_key):
+    vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
+    if not vid_match: return None
+    vid_id = vid_match.group(1)
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
-        vid_req = youtube.videos().list(part="snippet,statistics", id=video_id).execute()
+        vid_req = youtube.videos().list(part="snippet,statistics", id=vid_id).execute()
         if not vid_req['items']: return None
         item = vid_req['items'][0]
         comments = []
         try:
-            c_req = youtube.commentThreads().list(part="snippet", videoId=video_id, maxResults=10, textFormat="plainText", order="relevance").execute()
+            c_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=15, textFormat="plainText", order="relevance").execute()
             comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in c_req['items']]
-        except: comments = ["Comments disabled"]
-        
+        except: pass
         return {
-            "Title": item['snippet']['title'],
-            "Tags": item['snippet'].get('tags', []),
-            "Comments Sample": comments
+            "title": item['snippet']['title'],
+            "stats": item['statistics'],
+            "thumb": item['snippet']['thumbnails']['high']['url'],
+            "comments": comments
         }
     except: return None
 
@@ -189,22 +198,25 @@ def tab_channel_analyzer(api_key):
         try:
             df = pd.read_csv(uploaded_file)
             
-            # Limpieza robusta
+            # --- FIX TYPE ERROR (BLINDADO) ---
+            # 1. Eliminar filas totalmente vacías
+            df.dropna(how='all', inplace=True)
+            
+            # 2. Convertir columnas clave a tipos seguros
             for col in df.columns:
-                if "title" in col.lower(): df[col] = df[col].astype(str)
-                if any(x in col.lower() for x in ["views", "ctr", "duration"]):
+                col_lower = col.lower()
+                if "title" in col_lower or "título" in col_lower:
+                    df[col] = df[col].astype(str).fillna("")
+                elif any(x in col_lower for x in ["views", "ctr", "duration", "likes", "impressions"]):
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            data_sample = df.head(60).to_csv(index=False)
-            stats_summary = df.describe().to_string()
+            # Preparar muestra para la IA
+            data_sample = df.head(50).to_csv(index=False) # Reducido a 50 para ahorrar tokens
             
             prompt = f"""
             {STRATEGIST_PERSONA}
-            
             TASK: General Pattern Analysis (Shorts vs Longs).
-            STATS: {stats_summary}
             DATA SAMPLE: {data_sample}
-            
             OUTPUT:
             1. **Winning Formats:** What works?
             2. **Topic Clusters:** Keywords driving views.
@@ -259,38 +271,44 @@ def tab_metadata_analyzer(api_key):
         st.image(img, width=350)
         if st.button("🎯 Rate Thumbnail"):
             with st.spinner("Auditing..."):
-                prompt = f"{STRATEGIST_PERSONA}\nRate thumbnail 0-10. JSON Output: {{'Legibility':0, 'Emotion':0, 'Contrast':0}}\nShort critique."
+                prompt = f"{STRATEGIST_PERSONA}\nRate thumbnail 0-10. JSON Output: {{'Legibility':0, 'Emotion':0, 'Contrast':0, 'Curiosity':0}}\nShort critique."
                 res = generate_ai_response(prompt, api_key, img)
                 data = extract_json_from_ai(res)
                 if data:
                     fig = go.Figure(data=go.Scatterpolar(r=list(data.values()), theta=list(data.keys()), fill='toself'))
                     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 10])), showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
-                st.write(res.replace("{", "").replace("}", "") if data else res)
+                
+                # Limpiar JSON del texto si se muestra
+                clean_text = res
+                if "{" in res and "}" in res:
+                    clean_text = re.sub(r'\{.*?\}', '', res, flags=re.DOTALL)
+                
+                st.write(clean_text)
 
 def tab_engagement_room(api_key):
     st.header("💬 Engagement Visualizer")
     url = st.text_input("Video URL:", key="eng_url")
     if st.button("⚡ Analyze"):
         with st.spinner("Fetching..."):
-            vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
-            if vid_match:
-                data = get_deep_video_details(vid_match.group(1), api_key)
-                if data and data['Comments Sample']:
-                    text = " ".join(data['Comments Sample'])
-                    if WORDCLOUD_AVAILABLE:
-                        wc = WordCloud(width=800, height=300, background_color='black').generate(text)
-                        fig, ax = plt.subplots(figsize=(10, 4))
-                        ax.imshow(wc, interpolation='bilinear'); ax.axis("off")
-                        st.pyplot(fig)
-                    prompt = f"Analyze sentiment: '{text[:1000]}'. JSON: {{'Positive':0, 'Neutral':0, 'Negative':0}}"
-                    res = generate_ai_response(prompt, api_key)
-                    s_data = extract_json_from_ai(res)
-                    if s_data:
-                        fig = px.pie(values=list(s_data.values()), names=list(s_data.keys()), hole=0.5, color_discrete_sequence=px.colors.sequential.RdBu)
-                        st.plotly_chart(fig, use_container_width=True)
-                    st.write(generate_ai_response(f"Insights from comments: {text[:1000]}", api_key))
-                else: st.error("No comments found.")
+            data = get_video_deep_data(url, api_key)
+            if data and data['comments']:
+                text = " ".join(data['comments'])
+                if WORDCLOUD_AVAILABLE:
+                    wc = WordCloud(width=800, height=300, background_color='black').generate(text)
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.imshow(wc, interpolation='bilinear'); ax.axis("off")
+                    st.pyplot(fig)
+                
+                prompt = f"Analyze sentiment: '{text[:1000]}'. JSON: {{'Positive':0, 'Neutral':0, 'Negative':0}}"
+                res = generate_ai_response(prompt, api_key)
+                s_data = extract_json_from_ai(res)
+                if s_data:
+                    fig = px.pie(values=list(s_data.values()), names=list(s_data.keys()), hole=0.5, color_discrete_sequence=px.colors.sequential.RdBu)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                st.write(generate_ai_response(f"Specific insights from comments: {text[:1000]}", api_key))
+            else: st.error("No comments found.")
 
 def tab_competitor_analysis(api_key):
     st.header("⚔️ Competitor Heatmaps")
@@ -314,20 +332,21 @@ def tab_competitor_analysis(api_key):
                 with c2:
                     fig2 = px.scatter(df, x="Views", y="Likes", size="Comments", color="Competitor", hover_name="Title")
                     st.plotly_chart(fig2, use_container_width=True)
-            else: st.warning("No data found.")
+            else: st.warning("No data found (API Quota might be hit).")
 
 def tab_ideation(api_key):
     st.header("💡 Ideation Lab")
     handle = st.text_input("Handle (e.g. @Sidemen):")
     if st.button("Generate Ideas"):
         with st.spinner("Thinking..."):
+            # Límite reducido a 10 para ahorrar cuota
             vids = get_recent_videos(handle, api_key, limit=10)
             if vids:
                 titles = "\n".join([v['Title'] for v in vids])
                 prompt = f"{STRATEGIST_PERSONA}\nBased on:\n{titles}\nGenerate 10 VIRAL IDEAS."
                 res = generate_ai_response(prompt, api_key)
                 st.markdown(res)
-            else: st.error("Channel not found. Try searching channel name if handle fails.")
+            else: st.error("Channel not found. Check handle.")
 
 # --- MAIN ---
 def main():
