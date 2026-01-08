@@ -114,64 +114,63 @@ def generate_content_safe(model, inputs):
                 return f"❌ AI Error: {e}"
     return "❌ Failed after retries (Google API Limits)."
 
-# --- VIDEO VISION ENGINE (ROBUST DOWNLOAD) ---
+# --- VIDEO VISION ENGINE (ANDROID CAMOUFLAGE) ---
 def upload_video_to_gemini(video_url, api_key):
     genai.configure(api_key=api_key)
     
-    # 1. Create a specific TEMP DIRECTORY (Clean environment)
+    # Create clean temp dir
     temp_dir = tempfile.mkdtemp()
     
     status_text = st.empty()
-    status_text.info("⏳ Initializing Stealth Download (Bypassing Bot Detection)...")
+    status_text.info("⏳ Attempting Stealth Download (Mobile Spoofing)...")
     
     try:
-        # 2. Config yt-dlp to act like a Browser & use Directory
         file_path = os.path.join(temp_dir, "vision_video.mp4")
         
+        # NEW CONFIG: Pretend to be an Android Device to bypass Cloud Block
         ydl_opts = {
-            'format': 'best[height<=480][ext=mp4]/best[height<=360][ext=mp4]/best[ext=mp4]', # Flexible
+            'format': 'worst[ext=mp4]', # AI only needs pixels, low res is fine
             'outtmpl': file_path,
             'quiet': True,
             'noplaylist': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'], # TRICK: Use Android client
+                }
+            },
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
             }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         
-        # Check if file exists and has size
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            raise Exception("YouTube rejected the Cloud IP download request.")
+            raise Exception("YouTube blocked the download (403).")
 
-        # 3. Upload
-        status_text.info("☁️ Uploading content to Gemini Brain...")
+        # Upload
+        status_text.info("☁️ Uploading to Gemini Brain...")
         video_file = genai.upload_file(path=file_path)
         
-        # 4. Wait
+        # Wait
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = genai.get_file(video_file.name)
-            status_text.info("⚙️ Google is processing visual frames...")
+            status_text.info("⚙️ Processing video frames...")
             
         if video_file.state.name == "FAILED":
             raise Exception("Google Vision processing failed.")
             
-        status_text.success("✅ AI Vision Ready! (Video Loaded)")
+        status_text.success("✅ AI Vision Active!")
         time.sleep(1)
         status_text.empty()
-        
-        # Cleanup
         shutil.rmtree(temp_dir, ignore_errors=True)
         return video_file
         
     except Exception as e:
-        status_text.error(f"Vision Skipped: {e}")
-        st.caption("ℹ️ Note: If YouTube blocks Cloud IPs, the analysis will proceed using Transcript + Screenshots automatically.")
-        # Cleanup
+        status_text.error(f"Vision Unavailable: {e}")
+        st.warning("ℹ️ Cloud IP Blocked: Proceeding with Text & Image analysis only.")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
 
@@ -310,7 +309,7 @@ def main_app():
                     res = generate_content_safe(model, [f"{STRATEGIST_PERSONA}\nUser: {prompt_th}", st.session_state.thumb_img])
                     st.markdown(res)
 
-    # 3. DEEP DIVE (VIDEO VISION)
+    # 3. DEEP DIVE (STEALTH VISION)
     with tab_deep:
         st.header("🧠 360º Content Deep Dive")
         dd_url = st.text_input("YouTube URL:", key="dd_in")
@@ -388,7 +387,7 @@ def main_app():
                         res = generate_content_safe(model, inputs)
                         st.markdown(res)
 
-    # 4. DOWNLOADER
+    # 4. DOWNLOADER (STEALTH LINK)
     with tab_dl:
         st.header("📥 Asset Retrieval")
         dl_url = st.text_input("Paste YouTube URL:", key="dl_in")
@@ -414,7 +413,12 @@ def main_app():
                     full_url = f"https://www.youtube.com/watch?v={vid_match.group(1)}"
                     with st.spinner("Generating..."):
                         try:
-                            with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
+                            # Use Android Client to bypass block
+                            ydl_opts = {
+                                'quiet': True,
+                                'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+                            }
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                                 info = ydl.extract_info(full_url, download=False)
                                 best_url = None
                                 for f in info['formats']:
