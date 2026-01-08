@@ -5,11 +5,12 @@ from youtube_transcript_api import YouTubeTranscriptApi
 import pandas as pd
 import plotly.express as px
 import yt_dlp
-import zipfile
 import io
 import time
 import re
 import requests
+import os
+import tempfile
 from PIL import Image
 
 # --- CONFIGURATION ---
@@ -50,14 +51,14 @@ COMPETITORS = {
     "Chunkz": "Chunkz"
 }
 
-# --- SYSTEM PROMPTS (STRATEGIST PERSONA) ---
+# --- STRATEGIST PERSONA ---
 STRATEGIST_PERSONA = """
-You are a Senior YouTube Strategist & SEO Expert with 15+ years of experience.
-Your tone is professional, direct, and analytical. You adopt a 'comprehensive, 360-degree approach'.
-Never state the obvious. Provide high-level strategic insights.
+You are a Senior YouTube Strategist & SEO Expert (15+ years exp).
+Tone: Professional, Direct, Analytical. 
+Method: 360-degree analysis crossing Psychology, Algo-mechanics, and Content Strategy.
 """
 
-# --- AUTHENTICATION (FIXED) ---
+# --- AUTHENTICATION ---
 def check_login():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -68,22 +69,20 @@ def check_login():
         user = st.text_input("Username")
         pwd = st.text_input("Password", type="password")
         if st.form_submit_button("Access System"):
-            # 1. Read secrets safely
             try:
                 real_user = st.secrets["login"]["username"]
                 real_pass = st.secrets["login"]["password"]
             except KeyError:
-                st.error("🚨 Configuration Error: Secrets missing in Cloud.")
+                st.error("🚨 Cloud Config Error: Secrets missing.")
                 return False
 
-            # 2. Validate
             if user == real_user and pwd == real_pass:
                 st.session_state["authenticated"] = True
-                st.success("✅ Access Granted. Initializing Strategy Core...")
+                st.success("✅ Authenticated.")
                 time.sleep(0.5)
                 st.rerun()
             else:
-                st.error("❌ Access Denied: Invalid Credentials.")
+                st.error("❌ Invalid Credentials.")
     return False
 
 # --- INTELLIGENT MODEL SELECTOR ---
@@ -91,42 +90,96 @@ def get_best_model(api_key):
     genai.configure(api_key=api_key)
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority = ['models/gemini-2.0-flash', 'models/gemini-1.5-flash', 'models/gemini-1.5-pro']
+        # We need a model that supports vision/video well
+        priority = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-2.0-flash']
         for p in priority:
             if p in models: return p
         return models[0] if models else None
     except: return None
 
-# --- HELPER FUNCTIONS ---
+# --- ROBUST DATA FETCHING ---
 def get_channel_videos(channel_handle, api_key, limit=10):
     youtube = build('youtube', 'v3', developerKey=api_key)
     try:
         search = youtube.search().list(q=channel_handle, type="channel", part="id", maxResults=1).execute()
         if not search['items']: return []
         chan_id = search['items'][0]['id']['channelId']
-        
         search_vids = youtube.search().list(channelId=chan_id, type="video", part="id", order="date", maxResults=limit).execute()
         vid_ids = [item['id']['videoId'] for item in search_vids['items']]
-        
         stats = youtube.videos().list(part="snippet,statistics", id=",".join(vid_ids)).execute()
         return stats.get('items', [])
     except Exception as e:
-        st.error(f"Error fetching competitor: {e}")
+        st.error(f"API Error: {e}")
         return []
 
-def get_transcript(video_id):
+def get_transcript_or_fallback(video_id, snippet_description):
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'es', 'en-GB', 'auto'])
-        full_text = " ".join([entry['text'] for entry in transcript])
-        return full_text
-    except Exception as e:
-        return None
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript = transcript_list.find_transcript(['en', 'en-GB', 'es', 'es-ES']) 
+        if not transcript:
+            transcript = transcript_list.find_generated_transcript(['en', 'es'])
+        full_text = " ".join([t['text'] for t in transcript.fetch()])
+        return full_text, "✅ Official Transcript"
+    except Exception:
+        fallback_text = f"[TRANSCRIPT UNAVAILABLE - USING METADATA]\n\nVIDEO DESCRIPTION:\n{snippet_description}"
+        return fallback_text, "⚠️ Metadata Fallback (Desc)"
 
 def download_image_from_url(url):
     try:
         resp = requests.get(url, stream=True)
         return Image.open(io.BytesIO(resp.content))
     except: return None
+
+# --- NEW: VIDEO PROCESSING FOR AI VISION ---
+def upload_video_to_gemini(video_url, api_key):
+    """Downloads low-res video and uploads to Gemini File API."""
+    genai.configure(api_key=api_key)
+    
+    # 1. Create a temp file
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+        temp_path = temp_file.name
+    
+    status_text = st.empty()
+    status_text.info("⏳ Downloading video for AI Vision (Low-Res for speed)...")
+    
+    # 2. Download small video (worst quality is fine for AI understanding)
+    try:
+        ydl_opts = {
+            'format': 'worst[ext=mp4]', # Force smallest mp4
+            'outtmpl': temp_path,
+            'quiet': True,
+            'overwrites': True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+        
+        # 3. Upload to Gemini
+        status_text.info("☁️ Uploading video to Google AI Brain...")
+        video_file = genai.upload_file(path=temp_path)
+        
+        # 4. Wait for processing
+        while video_file.state.name == "PROCESSING":
+            time.sleep(2)
+            video_file = genai.get_file(video_file.name)
+            status_text.info("⚙️ Google is processing the video frames...")
+            
+        if video_file.state.name == "FAILED":
+            status_text.error("Video processing failed.")
+            return None
+            
+        status_text.success("✅ Video Ready for Vision Analysis!")
+        time.sleep(1)
+        status_text.empty()
+        
+        # Cleanup local file
+        os.remove(temp_path)
+        
+        return video_file
+        
+    except Exception as e:
+        status_text.error(f"Vision Error: {e}")
+        if os.path.exists(temp_path): os.remove(temp_path)
+        return None
 
 # --- MAIN APP ---
 def main_app():
@@ -141,30 +194,22 @@ def main_app():
     model_name = get_best_model(GEMINI_KEY)
     st.sidebar.caption(f"Engine: {model_name.split('/')[-1] if model_name else 'Offline'}")
 
-    # TABS
     tab_comp, tab_thumb, tab_deep, tab_dl = st.tabs([
-        "🕵️ Competitor Spy", 
-        "👁️ Thumbnail Rater", 
-        "🧠 Deep Dive (Transcript+Data)", 
-        "📥 Downloader"
+        "🕵️ Competitor Spy", "👁️ Thumbnail Rater", "🧠 Deep Dive", "📥 Downloader"
     ])
 
-    # ==================================================
     # 1. COMPETITOR SPY
-    # ==================================================
     with tab_comp:
         st.header("🕵️ Competitor Intelligence")
-        
         col_c1, col_c2 = st.columns([1, 2])
         with col_c1:
             selected_comp = st.selectbox("Select Rival:", list(COMPETITORS.keys()))
             custom_handle = st.text_input("Or Manual Handle:")
-        
         target = custom_handle if custom_handle else (COMPETITORS[selected_comp] if selected_comp else None)
 
         if st.button("Run Strategic Analysis") and target:
             with st.spinner(f"Extracting intelligence on {target}..."):
-                data = get_channel_videos(target, YT_KEY, limit=20)
+                data = get_channel_videos(target, YT_KEY, limit=15)
                 if data:
                     rows = []
                     for item in data:
@@ -185,53 +230,43 @@ def main_app():
             st.divider()
             c1, c2 = st.columns(2)
             with c1:
-                fig_views = px.bar(df, x='Title', y='Views', title="Recent Performance (Views)", color='Views')
+                fig_views = px.bar(df, x='Title', y='Views', title="Recent Views", color='Views')
                 fig_views.update_layout(xaxis={'visible': False}) 
                 st.plotly_chart(fig_views, use_container_width=True)
             with c2:
-                fig_scat = px.scatter(df, x='Views', y='Likes', size='Comments', hover_name='Title', title="Engagement Quality (Views vs Likes)")
+                fig_scat = px.scatter(df, x='Views', y='Likes', size='Comments', hover_name='Title', title="Engagement Matrix")
                 st.plotly_chart(fig_scat, use_container_width=True)
 
-            st.divider()
-            st.subheader("💬 Strategic Consultant Chat")
+            st.subheader("💬 Consultant Chat")
             if "comp_msgs" not in st.session_state: st.session_state.comp_msgs = []
-            
             for m in st.session_state.comp_msgs:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
             
-            if prompt := st.chat_input("Ask the Strategist about this competitor..."):
+            if prompt := st.chat_input("Ask about this competitor..."):
                 st.session_state.comp_msgs.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
-                
                 with st.chat_message("assistant"):
-                    genai.configure(api_key=GEMINI_KEY)
-                    model = genai.GenerativeModel(model_name)
-                    
-                    csv_context = df[['Title', 'Views', 'Likes', 'Comments']].head(15).to_csv(index=False)
-
-                    full_prompt = f"{STRATEGIST_PERSONA}\n\nDATA CONTEXT (Top 15 Recent):\n{csv_context}\n\nUSER QUESTION: {prompt}\n\nProvide a high-level strategic answer."
-                    
-                    with st.spinner("Strategizing..."):
+                    with st.spinner("Analyzing..."):
+                        genai.configure(api_key=GEMINI_KEY)
+                        model = genai.GenerativeModel(model_name)
+                        csv_context = df[['Title', 'Views', 'Likes']].head(15).to_csv(index=False)
+                        full_prompt = f"{STRATEGIST_PERSONA}\nDATA:\n{csv_context}\nUSER: {prompt}"
                         try:
                             res = model.generate_content(full_prompt).text
                             st.markdown(res)
                             st.session_state.comp_msgs.append({"role": "assistant", "content": res})
-                        except Exception as e:
-                             st.error(f"API Error (Quota or Model): {e}")
+                        except Exception as e: st.error(f"API Error: {e}")
 
-    # ==================================================
     # 2. THUMBNAIL VISION
-    # ==================================================
     with tab_thumb:
-        st.header("👁️ Thumbnail Strategic Audit")
-        
+        st.header("👁️ Thumbnail Audit")
         col_t1, col_t2 = st.columns(2)
         if "thumb_img" not in st.session_state: st.session_state.thumb_img = None
         
         with col_t1:
-            st.subheader("A. Analyze Published Video")
-            url_th = st.text_input("Paste Video URL:", key="thumb_url_input")
-            if st.button("Fetch Asset"):
+            st.subheader("Published Video")
+            url_th = st.text_input("Paste Video URL:", key="th_in")
+            if st.button("Fetch Thumbnail"):
                 vid_id = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url_th)
                 if vid_id:
                     img_url = f"https://img.youtube.com/vi/{vid_id.group(1)}/maxresdefault.jpg"
@@ -241,144 +276,131 @@ def main_app():
                         st.session_state.thumb_img = download_image_from_url(img_url)
 
         with col_t2:
-            st.subheader("B. Analyze Raw File")
-            uploaded_file = st.file_uploader("Upload Image (JPG/PNG)", type=['jpg', 'png', 'jpeg'])
-            if uploaded_file:
-                st.session_state.thumb_img = Image.open(uploaded_file)
+            st.subheader("Raw Upload")
+            uploaded = st.file_uploader("Upload Image", type=['jpg', 'png'])
+            if uploaded: st.session_state.thumb_img = Image.open(uploaded)
 
         if st.session_state.thumb_img:
-            st.image(st.session_state.thumb_img, caption="Asset Loaded", width=400)
-            
-            if st.button("🚀 Run 360º Visual Audit"):
-                with st.spinner("Analyzing composition, psychology, and CTR potential..."):
+            st.image(st.session_state.thumb_img, width=400)
+            if st.button("🚀 Run Visual Audit"):
+                with st.spinner("Auditing..."):
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
-                    prompt = f"{STRATEGIST_PERSONA}\n\nTASK: Conduct a rigorous 360-degree audit of this thumbnail. Evaluate: 1. Focal Point Clarity. 2. Text/Typography Hierarchy. 3. Emotional Hook. 4. Saturation/Contrast balance for Mobile. Give a final Strategic Rating (1-10) and specific improvement points."
+                    prompt = f"{STRATEGIST_PERSONA}\nAudit this thumbnail (1-10). Analyze Focal Point, Text, Emotion, and CTR potential."
                     try:
                         res = model.generate_content([prompt, st.session_state.thumb_img]).text
                         st.session_state['thumb_analysis'] = res
                     except Exception as e: st.error(f"API Error: {e}")
             
-            if 'thumb_analysis' in st.session_state:
-                st.markdown(st.session_state['thumb_analysis'])
-
-            st.subheader("💬 Refine Strategy")
-            if "thumb_chat" not in st.session_state: st.session_state.thumb_chat = []
-
-            for m in st.session_state.thumb_chat:
-                with st.chat_message(m["role"]): st.markdown(m["content"])
-
-            if prompt_th := st.chat_input("Ex: Would adding a red arrow improve CTR?"):
-                st.session_state.thumb_chat.append({"role": "user", "content": prompt_th})
+            if 'thumb_analysis' in st.session_state: st.markdown(st.session_state['thumb_analysis'])
+            
+            if prompt_th := st.chat_input("Refine strategy..."):
                 with st.chat_message("user"): st.markdown(prompt_th)
-                
                 with st.chat_message("assistant"):
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
-                    full_prompt = [f"{STRATEGIST_PERSONA}\n\nUser Question on this specific thumbnail: {prompt_th}", st.session_state.thumb_img]
-                    try:
-                        res = model.generate_content(full_prompt).text
-                        st.markdown(res)
-                        st.session_state.thumb_chat.append({"role": "assistant", "content": res})
-                    except Exception as e: st.error(f"API Error: {e}")
+                    res = model.generate_content([f"{STRATEGIST_PERSONA}\nUser: {prompt_th}", st.session_state.thumb_img]).text
+                    st.markdown(res)
 
-    # ==================================================
-    # 3. DEEP DIVE CORE
-    # ==================================================
+    # 3. DEEP DIVE (WITH VIDEO VISION)
     with tab_deep:
         st.header("🧠 360º Content Deep Dive")
-        st.markdown("Cross-references: **Transcript (Content)** + **Thumbnail (Visual)** + **Stats (Performance)** + **Comments (Feedback)**.")
-        
-        dd_url = st.text_input("YouTube URL to Deep Dive:", key="dd_url_input")
+        dd_url = st.text_input("YouTube URL:", key="dd_in")
         
         if "dd_data" not in st.session_state: st.session_state.dd_data = {}
+        if "uploaded_video" not in st.session_state: st.session_state.uploaded_video = None
 
-        if st.button("⚡ Initialize Full Spectrum Analysis"):
-            vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dd_url)
-            if vid_match:
-                vid_id = vid_match.group(1)
-                with st.spinner("📥 Aggregating Data Points..."):
-                    transcript = get_transcript(vid_id)
-                    st.session_state.dd_data['transcript'] = transcript if transcript else "No transcript available."
-                    
-                    youtube = build('youtube', 'v3', developerKey=YT_KEY)
-                    vid_req = youtube.videos().list(part="snippet,statistics", id=vid_id).execute()
-                    if vid_req['items']:
-                        item = vid_req['items'][0]
-                        st.session_state.dd_data['title'] = item['snippet']['title']
-                        st.session_state.dd_data['stats'] = item['statistics']
-                        thumb_url = item['snippet']['thumbnails'].get('maxres', {}).get('url') or item['snippet']['thumbnails']['high']['url']
-                        st.session_state.dd_data['image'] = download_image_from_url(thumb_url)
-                    
-                    try:
-                        com_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=50, textFormat="plainText").execute()
-                        comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in com_req.get('items', [])]
-                        st.session_state.dd_data['comments'] = "\n".join(comments)
-                    except:
-                        st.session_state.dd_data['comments'] = "Comments unavailable."
-
-                    st.success("✅ 360 Data Grid Loaded.")
-            else: st.error("Invalid URL")
+        col_act1, col_act2 = st.columns(2)
+        
+        with col_act1:
+            if st.button("⚡ 1. Initialize Metadata"):
+                vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dd_url)
+                if vid_match:
+                    vid_id = vid_match.group(1)
+                    with st.spinner("Aggregating Data..."):
+                        youtube = build('youtube', 'v3', developerKey=YT_KEY)
+                        vid_req = youtube.videos().list(part="snippet,statistics", id=vid_id).execute()
+                        if vid_req['items']:
+                            item = vid_req['items'][0]
+                            st.session_state.dd_data['title'] = item['snippet']['title']
+                            st.session_state.dd_data['stats'] = item['statistics']
+                            desc = item['snippet']['description']
+                            content_text, source_label = get_transcript_or_fallback(vid_id, desc)
+                            st.session_state.dd_data['transcript'] = content_text
+                            st.session_state.dd_data['source_label'] = source_label
+                            thumb_url = item['snippet']['thumbnails'].get('maxres', {}).get('url') or item['snippet']['thumbnails']['high']['url']
+                            st.session_state.dd_data['image'] = download_image_from_url(thumb_url)
+                            try:
+                                com_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=50, textFormat="plainText").execute()
+                                comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in com_req.get('items', [])]
+                                st.session_state.dd_data['comments'] = "\n".join(comments)
+                            except: st.session_state.dd_data['comments'] = "Comments disabled."
+                            st.success(f"✅ Metadata Loaded.")
+                else: st.error("Invalid URL")
+        
+        with col_act2:
+            if st.session_state.dd_data:
+                if st.button("👁️ 2. AI Watch Video (Vision Analysis)"):
+                    with st.spinner("Preparing Vision System..."):
+                        vid_file = upload_video_to_gemini(dd_url, GEMINI_KEY)
+                        if vid_file:
+                            st.session_state.uploaded_video = vid_file
 
         if st.session_state.dd_data:
             st.divider()
             c1, c2, c3 = st.columns(3)
             c1.metric("Views", st.session_state.dd_data['stats'].get('viewCount'))
-            c2.metric("Retention/Likes", st.session_state.dd_data['stats'].get('likeCount'))
-            c3.info(f"Transcript Status: {'Available' if len(st.session_state.dd_data['transcript']) > 50 else 'Missing'}")
+            c2.metric("Likes", st.session_state.dd_data['stats'].get('likeCount'))
+            c3.info(f"Context: {st.session_state.dd_data.get('source_label')}")
+            
+            if st.session_state.uploaded_video:
+                st.success("🟢 AI Vision Active: Gemini is watching the video frames.")
 
-            st.subheader("💬 Strategic Inquiry")
             if "dd_chat" not in st.session_state: st.session_state.dd_chat = []
-
             for m in st.session_state.dd_chat:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
 
-            if prompt_dd := st.chat_input("Ex: Audit the hook (0-30s) vs the thumbnail promise."):
+            if prompt_dd := st.chat_input("Ex: How is the editing pacing in the first minute?"):
                 st.session_state.dd_chat.append({"role": "user", "content": prompt_dd})
                 with st.chat_message("user"): st.markdown(prompt_dd)
-                
                 with st.chat_message("assistant"):
-                    with st.spinner("Synthesizing multi-modal strategy..."):
+                    with st.spinner("Synthesizing..."):
                         genai.configure(api_key=GEMINI_KEY)
                         model = genai.GenerativeModel(model_name)
                         
-                        # LIMIT TRANSCRIPT SIZE
-                        safe_transcript = st.session_state.dd_data['transcript'][:20000]
-
+                        # BUILD INPUT LIST
+                        safe_text = st.session_state.dd_data['transcript'][:15000]
                         inputs = [
-                            f"""
-                            {STRATEGIST_PERSONA}
-                            
+                            f"""{STRATEGIST_PERSONA}
                             DATA GRID:
                             1. Title: {st.session_state.dd_data['title']}
-                            2. Key Metrics: {st.session_state.dd_data['stats']}
-                            3. Audience Sentiment (Comments): {st.session_state.dd_data['comments']}
-                            4. Content (Transcript): {safe_transcript} (truncated)
-                            
-                            TASK: Provide a comprehensive answer to the user query, explicitly crossing data points (e.g., "The thumbnail promised X, but the transcript shows Y at minute 2, explaining the comment Z").
-                            
-                            USER QUERY: {prompt_dd}
-                            """,
+                            2. Metrics: {st.session_state.dd_data['stats']}
+                            3. Transcript/Meta: {safe_text}
+                            4. Feedback: {st.session_state.dd_data['comments']}
+                            TASK: Answer user query crossing all data points.
+                            USER: {prompt_dd}""",
                             st.session_state.dd_data['image']
                         ]
+                        
+                        # Add Video File if available
+                        if st.session_state.uploaded_video:
+                            inputs.append(st.session_state.uploaded_video)
+                            inputs.append("Analyze the video visuals, editing, and pacing relevant to the question.")
+
                         try:
                             res = model.generate_content(inputs).text
                             st.markdown(res)
                             st.session_state.dd_chat.append({"role": "assistant", "content": res})
-                        except Exception as e: st.error(f"API Error: {e}")
+                        except Exception as e: st.error(f"AI Error: {e}")
 
-    # ==================================================
-    # 4. DOWNLOADER (FIXED)
-    # ==================================================
+    # 4. DOWNLOADER
     with tab_dl:
         st.header("📥 Asset Retrieval")
-        dl_url = st.text_input("Paste YouTube URL:", key="dl_url_input")
-        
-        vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_url)
+        dl_url = st.text_input("Paste YouTube URL:", key="dl_in")
         
         c1, c2 = st.columns(2)
-        
-        # Thumb Downloader
+        vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_url)
+
         with c1:
             if st.button("🖼️ Get Thumbnail"):
                 if vid_match:
@@ -388,38 +410,26 @@ def main_app():
                         resp = requests.get(img_url)
                         if resp.status_code == 200:
                             st.image(resp.content, width=300)
-                            st.download_button("⬇️ Save JPG", resp.content, file_name=f"{vid_id}_thumb.jpg", mime="image/jpeg")
-                        else: st.error("Thumbnail not found (try HQ).")
-                    except: st.error("Error fetching image.")
+                            st.download_button("⬇️ Save JPG", resp.content, file_name=f"{vid_id}.jpg", mime="image/jpeg")
+                        else: st.error("HQ Thumb not found.")
+                    except: st.error("Error.")
 
-        # Video Link Generator
         with c2:
-            if st.button("🎥 Get 720p Video Link"):
+            if st.button("🎥 Get 720p Link"):
                 if vid_match:
-                    vid_id = vid_match.group(1)
-                    full_url = f"https://www.youtube.com/watch?v={vid_id}"
-                    with st.spinner("Generating direct link..."):
+                    full_url = f"https://www.youtube.com/watch?v={vid_match.group(1)}"
+                    with st.spinner("Generating..."):
                         try:
-                            ydl_opts = {'quiet': True}
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
                                 info = ydl.extract_info(full_url, download=False)
                                 best_url = None
-                                best_height = 0
-                                # Find best mp4 with audio
                                 for f in info['formats']:
-                                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
-                                        h = f.get('height', 0)
-                                        if h > best_height:
-                                            best_height = h
-                                            best_url = f['url']
+                                    if f.get('ext') == 'mp4' and f.get('acodec') != 'none':
+                                        best_url = f['url'] # Keep updating to get last (usually best)
                                 
-                                if best_url:
-                                    st.success(f"Link Generated ({best_height}p)")
-                                    st.markdown(f"[👉 Click here to Download MP4]({best_url})")
-                                else: 
-                                    st.warning("No suitable direct link found.")
-                        except Exception as e: 
-                            st.error(f"Error: {e}")
+                                if best_url: st.markdown(f"[👉 Click to Download MP4]({best_url})")
+                                else: st.warning("No direct link.")
+                        except Exception as e: st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     if check_login():
