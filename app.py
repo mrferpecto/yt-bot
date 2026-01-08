@@ -17,7 +17,7 @@ from PIL import Image
 # Configuración
 st.set_page_config(page_title="Front Three's AI Studio", page_icon="⚡", layout="wide")
 
-# Database Competidores
+# Competidores
 COMPETITORS = {
     "Sidemen": "Sidemen", "Beta Squad": "BetaSquad", "The Overlap": "TheOverlap",
     "Ben Foster": "BenFosterTheCyclingGK", "Pitch Side": "PitchSide", "FilthyFellas": "FilthyFellas",
@@ -34,7 +34,7 @@ COMPETITORS = {
 STRATEGIST_PERSONA = """
 Role: Senior YouTube Strategist.
 Tone: Direct, Surgical, High-Value.
-Instructions: No intro/outro. Bullet points only. Focus on patterns.
+Focus: Retention, CTR, and Algorithm Patterns.
 """
 
 # --- HELPERS ---
@@ -76,35 +76,36 @@ def get_recent_videos(channel_handle, api_key, limit=10):
         return videos
     except: return []
 
-# --- AI CORE INTELIGENTE ---
+# --- AI CORE ---
 def get_available_model(api_key):
-    """Pregunta a Google qué modelos existen para evitar errores 404"""
     genai.configure(api_key=api_key)
     try:
-        # Intenta listar modelos compatibles
         models = genai.list_models()
         for m in models:
             if 'generateContent' in m.supported_generation_methods:
-                # Priorizar los rápidos si existen
                 if 'flash' in m.name: return m.name
-                if 'pro' in m.name: return m.name
-        # Si no encuentra preferidos, devuelve el primero genérico
-        return 'models/gemini-pro'
-    except:
-        # Fallback de emergencia si list_models falla
         return 'models/gemini-1.5-flash'
+    except: return 'models/gemini-1.5-flash'
 
 def generate_ai_response(prompt, api_key, image=None):
-    # 1. Autodetectar modelo
     model_name = get_available_model(api_key)
     genai.configure(api_key=api_key)
-    
     try:
         model = genai.GenerativeModel(model_name)
         inputs = [prompt, image] if image else prompt
         return model.generate_content(inputs).text
     except Exception as e:
-        return f"⚠️ AI ERROR ({model_name}): {str(e)}"
+        return f"⚠️ AI ERROR: {str(e)}"
+
+def extract_json_from_ai(text):
+    """Extrae JSON limpio de la respuesta de la IA"""
+    try:
+        # Busca el primer corchete [ o llave {
+        match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except: pass
+    return None
 
 # --- INTERFAZ ---
 def main():
@@ -116,33 +117,23 @@ def main():
         user = st.text_input("User")
         pwd = st.text_input("Password", type="password")
         if st.button("Enter"):
-            # Comprobación de seguridad para que no explote si faltan secrets
             try:
-                real_u = st.secrets["login"]["username"]
-                real_p = st.secrets["login"]["password"]
-            except:
-                st.error("Secrets missing!")
-                st.stop()
-                
-            if user == real_u and pwd == real_p:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Wrong credentials")
+                if user == st.secrets["login"]["username"] and pwd == st.secrets["login"]["password"]:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else: st.error("Wrong credentials")
+            except: st.error("Secrets missing")
         return
 
-    # Cargar API Keys
     try:
         YT_KEY = st.secrets["api"]["youtube_key"]
         GEMINI_KEY = st.secrets["api"]["gemini_key"]
     except:
-        st.error("Secrets missing. Check configuration.")
+        st.error("Secrets configuration error.")
         st.stop()
 
-    st.sidebar.info(f"System Ready 🟢")
-
     # TABS
-    t1, t2, t3, t4, t5, t6 = st.tabs(["📊 Channel", "📥 Downloader", "👁️ Metadata", "💬 Engagement", "⚔️ Competitors", "💡 Ideation"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📊 Channel", "📥 Downloader", "👁️ Metadata", "💬 Engagement", "⚔️ Competitors", "💡 Ideation (Interactive)"])
 
     # 1. Channel
     with t1:
@@ -150,7 +141,7 @@ def main():
         uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
         if uploaded_file and st.button("Analyze CSV"):
             df = pd.read_csv(uploaded_file)
-            df = df.astype(str) # Evita TypeError
+            df = df.astype(str)
             data_sample = df.head(40).to_csv(index=False)
             prompt = f"{STRATEGIST_PERSONA}\nAnalyze this data:\n{data_sample}"
             res = generate_ai_response(prompt, GEMINI_KEY)
@@ -183,10 +174,10 @@ def main():
                 st.markdown(res)
             except: st.error("Error loading image")
 
-    # 4. Engagement (Simplified)
+    # 4. Engagement (Placeholder)
     with t4:
         st.header("💬 Engagement")
-        st.info("Coming soon")
+        st.info("Module ready for expansion.")
 
     # 5. Competitors
     with t5:
@@ -196,21 +187,91 @@ def main():
             vids = get_recent_videos(COMPETITORS[sel], YT_KEY)
             st.dataframe(pd.DataFrame(vids))
 
-    # 6. Ideation (EL QUE FALLABA)
+    # ==========================================
+    # 6. IDEATION LAB (INTERACTIVE & CLICKABLE)
+    # ==========================================
     with t6:
-        st.header("💡 Ideation Lab")
-        handle = st.text_input("Handle (e.g. @Sidemen):")
-        if st.button("Generate Ideas"):
-            with st.spinner("Analyzing..."):
+        st.header("💡 Ideation Lab (Interactive)")
+        st.markdown("Generates clickable ideas. Click to expand and generate a full 13-25 min structure.")
+        
+        handle = st.text_input("Analyze Handle (e.g. @Sidemen):")
+        
+        # Estado para guardar las ideas generadas y no perderlas al clicar
+        if "generated_ideas" not in st.session_state:
+            st.session_state.generated_ideas = None
+
+        if st.button("🚀 Generate 10 Viral Concepts"):
+            with st.spinner("Analyzing channel DNA & Generating Concepts..."):
                 vids = get_recent_videos(handle, YT_KEY, limit=10)
                 if vids:
                     titles = "\n".join([v['Title'] for v in vids])
-                    prompt = f"{STRATEGIST_PERSONA}\nBased on these titles:\n{titles}\nGenerate 10 ideas."
-                    # AQUÍ ESTÁ LA MAGIA: Usamos la función inteligente
+                    
+                    # PROMPT ESPECIAL PARA JSON
+                    prompt = f"""
+                    {STRATEGIST_PERSONA}
+                    Based on these successful titles:
+                    {titles}
+                    
+                    Generate 10 NEW VIRAL VIDEO IDEAS tailored for this channel.
+                    The format must be a valid JSON LIST of objects.
+                    Each object must have:
+                    - "title": The clickbaity title.
+                    - "hook": A 1-sentence explanation of why it works.
+                    
+                    Example Output format:
+                    [
+                        {{"title": "I Spent 24H in a Freezer", "hook": "High stakes challenge..."}},
+                        {{"title": "Sidemen vs Beta Squad", "hook": "Collab hype..."}}
+                    ]
+                    RETURN ONLY THE JSON.
+                    """
+                    
                     res = generate_ai_response(prompt, GEMINI_KEY)
-                    st.markdown(res)
+                    ideas_json = extract_json_from_ai(res)
+                    
+                    if ideas_json:
+                        st.session_state.generated_ideas = ideas_json
+                        st.success("✅ Ideas generated! Click below to plan them.")
+                    else:
+                        st.error("AI returned invalid format. Try again.")
+                        st.write(res) # Debug
                 else:
-                    st.error("No videos found. Check handle or API Quota.")
+                    st.error("Channel not found.")
+
+        # RENDERIZADO DE LAS IDEAS CLICKABLES
+        if st.session_state.generated_ideas:
+            st.divider()
+            st.subheader("🎬 Select an Idea to Blueprint")
+            
+            for i, idea in enumerate(st.session_state.generated_ideas):
+                # Usamos expander para crear el efecto "Menú desplegable"
+                with st.expander(f"📌 {i+1}. {idea.get('title', 'Unknown Title')}"):
+                    st.write(f"**The Hook:** {idea.get('hook', '')}")
+                    
+                    # Botón único para cada idea
+                    if st.button(f"⚡ Generate 20-Min Script Structure", key=f"btn_idea_{i}"):
+                        with st.spinner("Architecting the perfect video..."):
+                            deep_prompt = f"""
+                            {STRATEGIST_PERSONA}
+                            
+                            TASK: Create a full production blueprint for a 13-25 minute YouTube video.
+                            
+                            TITLE: {idea.get('title')}
+                            CONTEXT: Derived from a high-performance channel analysis.
+                            
+                            REQUIREMENTS:
+                            1. **Thumbnail Concept:** Describe the visual.
+                            2. **The Hook (0:00 - 1:30):** Exact scripting for the first minute to max retention.
+                            3. **Pacing Structure (The Meat):** Break down the 15-20 minutes into 3-4 Acts/Segments. 
+                            4. **Retention Spikes:** Where to add tension/twists to prevent drop-off.
+                            5. **Outro/CTA:** Best way to convert subs.
+                            6. **Optimized Description:** First 3 lines for SEO.
+                            
+                            Format nicely with Markdown.
+                            """
+                            
+                            script_res = generate_ai_response(deep_prompt, GEMINI_KEY)
+                            st.markdown(script_res)
 
 if __name__ == "__main__":
     main()
