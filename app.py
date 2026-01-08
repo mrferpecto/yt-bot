@@ -207,11 +207,18 @@ def main_app():
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
                     
-                    full_prompt = f"{STRATEGIST_PERSONA}\n\nDATA CONTEXT:\n{df.to_string()}\n\nUSER QUESTION: {prompt}\n\nProvide a high-level strategic answer."
+                    # LIMIT DATAFRAME SIZE TO AVOID QUOTA ERRORS
+                    csv_context = df[['Title', 'Views', 'Likes', 'Comments']].head(15).to_csv(index=False)
+
+                    full_prompt = f"{STRATEGIST_PERSONA}\n\nDATA CONTEXT (Top 15 Recent):\n{csv_context}\n\nUSER QUESTION: {prompt}\n\nProvide a high-level strategic answer."
                     
-                    res = model.generate_content(full_prompt).text
-                    st.markdown(res)
-                    st.session_state.comp_msgs.append({"role": "assistant", "content": res})
+                    with st.spinner("Strategizing..."):
+                        try:
+                            res = model.generate_content(full_prompt).text
+                            st.markdown(res)
+                            st.session_state.comp_msgs.append({"role": "assistant", "content": res})
+                        except Exception as e:
+                             st.error(f"API Error (Quota or Model): {e}")
 
     # ==================================================
     # 2. THUMBNAIL VISION
@@ -224,7 +231,7 @@ def main_app():
         
         with col_t1:
             st.subheader("A. Analyze Published Video")
-            url_th = st.text_input("Paste Video URL:")
+            url_th = st.text_input("Paste Video URL:", key="thumb_url_input")
             if st.button("Fetch Asset"):
                 vid_id = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url_th)
                 if vid_id:
@@ -248,8 +255,10 @@ def main_app():
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
                     prompt = f"{STRATEGIST_PERSONA}\n\nTASK: Conduct a rigorous 360-degree audit of this thumbnail. Evaluate: 1. Focal Point Clarity. 2. Text/Typography Hierarchy. 3. Emotional Hook. 4. Saturation/Contrast balance for Mobile. Give a final Strategic Rating (1-10) and specific improvement points."
-                    res = model.generate_content([prompt, st.session_state.thumb_img]).text
-                    st.session_state['thumb_analysis'] = res
+                    try:
+                        res = model.generate_content([prompt, st.session_state.thumb_img]).text
+                        st.session_state['thumb_analysis'] = res
+                    except Exception as e: st.error(f"API Error: {e}")
             
             if 'thumb_analysis' in st.session_state:
                 st.markdown(st.session_state['thumb_analysis'])
@@ -268,9 +277,11 @@ def main_app():
                     genai.configure(api_key=GEMINI_KEY)
                     model = genai.GenerativeModel(model_name)
                     full_prompt = [f"{STRATEGIST_PERSONA}\n\nUser Question on this specific thumbnail: {prompt_th}", st.session_state.thumb_img]
-                    res = model.generate_content(full_prompt).text
-                    st.markdown(res)
-                    st.session_state.thumb_chat.append({"role": "assistant", "content": res})
+                    try:
+                        res = model.generate_content(full_prompt).text
+                        st.markdown(res)
+                        st.session_state.thumb_chat.append({"role": "assistant", "content": res})
+                    except Exception as e: st.error(f"API Error: {e}")
 
     # ==================================================
     # 3. DEEP DIVE CORE
@@ -279,7 +290,7 @@ def main_app():
         st.header("🧠 360º Content Deep Dive")
         st.markdown("Cross-references: **Transcript (Content)** + **Thumbnail (Visual)** + **Stats (Performance)** + **Comments (Feedback)**.")
         
-        dd_url = st.text_input("YouTube URL to Deep Dive:")
+        dd_url = st.text_input("YouTube URL to Deep Dive:", key="dd_url_input")
         
         if "dd_data" not in st.session_state: st.session_state.dd_data = {}
 
@@ -300,9 +311,12 @@ def main_app():
                         thumb_url = item['snippet']['thumbnails'].get('maxres', {}).get('url') or item['snippet']['thumbnails']['high']['url']
                         st.session_state.dd_data['image'] = download_image_from_url(thumb_url)
                     
-                    com_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=50, textFormat="plainText").execute()
-                    comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in com_req.get('items', [])]
-                    st.session_state.dd_data['comments'] = "\n".join(comments)
+                    try:
+                        com_req = youtube.commentThreads().list(part="snippet", videoId=vid_id, maxResults=50, textFormat="plainText").execute()
+                        comments = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in com_req.get('items', [])]
+                        st.session_state.dd_data['comments'] = "\n".join(comments)
+                    except:
+                        st.session_state.dd_data['comments'] = "Comments unavailable."
 
                     st.success("✅ 360 Data Grid Loaded.")
             else: st.error("Invalid URL")
@@ -329,6 +343,9 @@ def main_app():
                         genai.configure(api_key=GEMINI_KEY)
                         model = genai.GenerativeModel(model_name)
                         
+                        # LIMIT TRANSCRIPT SIZE
+                        safe_transcript = st.session_state.dd_data['transcript'][:20000]
+
                         inputs = [
                             f"""
                             {STRATEGIST_PERSONA}
@@ -337,7 +354,7 @@ def main_app():
                             1. Title: {st.session_state.dd_data['title']}
                             2. Key Metrics: {st.session_state.dd_data['stats']}
                             3. Audience Sentiment (Comments): {st.session_state.dd_data['comments']}
-                            4. Content (Transcript): {st.session_state.dd_data['transcript'][:30000]} (truncated)
+                            4. Content (Transcript): {safe_transcript} (truncated)
                             
                             TASK: Provide a comprehensive answer to the user query, explicitly crossing data points (e.g., "The thumbnail promised X, but the transcript shows Y at minute 2, explaining the comment Z").
                             
@@ -345,23 +362,54 @@ def main_app():
                             """,
                             st.session_state.dd_data['image']
                         ]
-                        
-                        res = model.generate_content(inputs).text
-                        st.markdown(res)
-                        st.session_state.dd_chat.append({"role": "assistant", "content": res})
+                        try:
+                            res = model.generate_content(inputs).text
+                            st.markdown(res)
+                            st.session_state.dd_chat.append({"role": "assistant", "content": res})
+                        except Exception as e: st.error(f"API Error: {e}")
 
     # ==================================================
-    # 4. DOWNLOADER
+    # 4. DOWNLOADER (FIXED)
     # ==================================================
     with tab_dl:
         st.header("📥 Asset Retrieval")
-        dl_text = st.text_area("Paste URLs for Quick Link Generation:")
-        if st.button("Generate Secure Links"):
-            ids = re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_text)
-            for vid in ids:
-                st.markdown(f"**Video ID {vid}**: [Direct Download Link](https://www.youtube.com/watch?v={vid})")
-            st.info("Note: For 4K/1080p raw file merging, please use the local Python script version due to Cloud processing limits.")
+        dl_url = st.text_input("Paste YouTube URL:", key="dl_url_input")
+        
+        vid_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_url)
+        
+        c1, c2 = st.columns(2)
+        
+        # Thumb Downloader
+        with c1:
+            if st.button("🖼️ Get Thumbnail"):
+                if vid_match:
+                    vid_id = vid_match.group(1)
+                    img_url = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
+                    try:
+                        resp = requests.get(img_url)
+                        if resp.status_code == 200:
+                            st.image(resp.content, width=300)
+                            st.download_button("⬇️ Save JPG", resp.content, file_name=f"{vid_id}_thumb.jpg", mime="image/jpeg")
+                        else: st.error("Thumbnail not found (try HQ).")
+                    except: st.error("Error fetching image.")
 
-if __name__ == "__main__":
-    if check_login():
-        main_app()
+        # Video Link Generator
+        with c2:
+            if st.button("🎥 Get 720p Video Link"):
+                if vid_match:
+                    vid_id = vid_match.group(1)
+                    full_url = f"https://www.youtube.com/watch?v={vid_id}"
+                    with st.spinner("Generating direct link..."):
+                        try:
+                            ydl_opts = {'quiet': True}
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(full_url, download=False)
+                                best_url = None
+                                best_height = 0
+                                # Find best mp4 with audio
+                                for f in info['formats']:
+                                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
+                                        h = f.get('height', 0)
+                                        if h > best_height:
+                                            best_height = h
+                                            best_url = f['url']
