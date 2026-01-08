@@ -21,6 +21,8 @@ def check_login():
         return True
 
     st.title("🔒 Restricted Access")
+    st.markdown("Please log in to access the FrontThree Tools.")
+
     with st.form("login_form"):
         username_input = st.text_input("Username")
         password_input = st.text_input("Password", type="password") 
@@ -30,46 +32,82 @@ def check_login():
                 real_pass = st.secrets["login"]["password"]
                 if username_input == real_user and password_input == real_pass:
                     st.session_state["authenticated"] = True
+                    st.success("✅ Access Granted.")
+                    time.sleep(0.5)
                     st.rerun()
                 else:
                     st.error("❌ Invalid credentials.")
             except KeyError:
-                st.error("🚨 Secrets not configured.")
+                st.error("🚨 System Error: Secrets not configured.")
     return False
 
-# --- DEBUGGING FUNCTIONS (THE TRUTH SERUM) ---
-def get_library_version():
+# --- INTELLIGENT MODEL SELECTOR ---
+def get_best_available_model(api_key):
+    """Finds the best model available in YOUR account automatically."""
+    genai.configure(api_key=api_key)
     try:
-        return genai.__version__
-    except:
-        return "Unknown (Old Version)"
-
-def list_available_models(api_key):
-    try:
-        genai.configure(api_key=api_key)
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                models.append(m.name)
-        return models
+        # Get all models your key can see
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Priority list (Newest/Fastest first)
+        priorities = [
+            'models/gemini-2.5-flash',
+            'models/gemini-2.0-flash',
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
+        ]
+        
+        # Check if we have any of the priority models
+        for p in priorities:
+            if p in available_models:
+                return p
+        
+        # Fallback: Just take the first one available if none of the above match
+        if available_models:
+            return available_models[0]
+        
+        return None
     except Exception as e:
-        return [f"Error listing models: {str(e)}"]
+        return None
 
 # --- API HELPERS ---
-def get_video_comments(video_id, api_key, max_limit=200):
+def get_video_stats_batch(video_ids, api_key):
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
-        comments = []
-        request = youtube.commentThreads().list(
-            part="snippet", videoId=video_id, maxResults=100, textFormat="plainText"
-        )
-        response = request.execute()
-        for item in response['items']:
-            comments.append(item['snippet']['topLevelComment']['snippet']['textDisplay'])
-        return comments
+        all_items = []
+        for i in range(0, len(video_ids), 50):
+            chunk = video_ids[i:i+50]
+            request = youtube.videos().list(
+                part="snippet,statistics",
+                id=",".join(chunk)
+            )
+            response = request.execute()
+            all_items.extend(response.get('items', []))
+        return all_items
     except Exception as e:
         st.error(f"YouTube API Error: {e}")
         return []
+
+def get_video_comments(video_id, api_key, max_limit=300):
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        comments = []
+        next_page_token = None
+        while len(comments) < max_limit:
+            request = youtube.commentThreads().list(
+                part="snippet", videoId=video_id, maxResults=100,
+                textFormat="plainText", pageToken=next_page_token
+            )
+            response = request.execute()
+            for item in response['items']:
+                comments.append(item['snippet']['topLevelComment']['snippet']['textDisplay'])
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token: break
+        return comments
+    except Exception as e:
+        st.error(f"Error fetching comments: {e}")
+        return comments
 
 def download_thumbnail_bytes(url):
     try:
@@ -83,87 +121,152 @@ def download_thumbnail_bytes(url):
         return None, str(e)
 
 # --- AI WRAPPER ---
-def ask_gemini(prompt, api_key, selected_model):
-    genai.configure(api_key=api_key)
+def ask_gemini(prompt, api_key):
+    # 1. Auto-detect best model
+    model_name = get_best_available_model(api_key)
+    
+    if not model_name:
+        return "❌ Error: No compatible Gemini models found for your API Key."
+
+    # 2. Generate Content
     try:
-        model = genai.GenerativeModel(selected_model)
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
         return model.generate_content(prompt).text
     except Exception as e:
-        return f"❌ AI Error: {e}"
+        return f"❌ AI Error ({model_name}): {e}"
 
 # --- MAIN APP ---
 def main_app():
     try:
         YT_KEY = st.secrets["api"]["youtube_key"]
         GEMINI_KEY = st.secrets["api"]["gemini_key"]
-    except:
-        st.error("Secrets missing.")
+    except KeyError:
+        st.error("🚨 API Keys missing in secrets.")
         st.stop()
 
-    # --- SIDEBAR DIAGNOSTICS ---
-    st.sidebar.header("🛠️ Diagnostics")
-    lib_ver = get_library_version()
-    st.sidebar.info(f"GenAI Lib Version: {lib_ver}")
+    st.sidebar.success(f"User: {st.secrets['login']['username']}")
     
-    st.sidebar.write("---")
-    st.sidebar.write("🔎 **Model Checker**")
-    if st.sidebar.button("List Available Models"):
-        available_models = list_available_models(GEMINI_KEY)
-        st.sidebar.success("Models found:")
-        st.sidebar.code("\n".join(available_models))
-        st.session_state['valid_models'] = available_models
+    # Show connected model in sidebar (Peace of mind)
+    connected_model = get_best_available_model(GEMINI_KEY)
+    if connected_model:
+        st.sidebar.info(f"🤖 Connected to: {connected_model.replace('models/', '')}")
+    else:
+        st.sidebar.error("⚠️ No AI Model found")
 
-    # Determine which model to use
-    default_model = 'models/gemini-1.5-flash'
-    # If we found models, grab the first one that looks like flash or pro
-    if 'valid_models' in st.session_state and st.session_state['valid_models']:
-        for m in st.session_state['valid_models']:
-            if 'flash' in m:
-                default_model = m
-                break
-            elif 'pro' in m:
-                default_model = m
-                break
-    
-    st.sidebar.write(f"**Targeting Model:** `{default_model}`")
+    if st.sidebar.button("Logout"):
+        st.session_state["authenticated"] = False
+        st.rerun()
 
-    # --- MAIN UI ---
-    st.title("⚡ FrontThree Suite (Debug Mode)")
-    
-    tab1, tab2 = st.tabs(["📥 Downloader", "🔴 Deep Dive"])
+    st.title("⚡ FrontThree YT Management Suite")
+    tab1, tab2, tab3 = st.tabs(["📊 Analytics Chat", "📥 Downloader", "🔴 Deep Dive"])
 
+    # TAB 1: ANALYTICS
     with tab1:
-        st.header("📥 Downloader")
-        dl_urls = st.text_area("Paste URLs:")
-        ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)))
-        if st.button("Get Thumbs"):
-            if ids:
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w") as zf:
-                    for i, vid in enumerate(ids):
-                        d, n = download_thumbnail_bytes(f"https://youtu.be/{vid}")
-                        if d: zf.writestr(n, d)
-                st.download_button("Download ZIP", zip_buffer.getvalue(), "thumbs.zip")
+        st.header("🧠 Chat with your Data")
+        urls_input = st.text_area("Paste Video URLs:", height=100)
+        
+        if "analytics_data" not in st.session_state:
+            st.session_state.analytics_data = None
 
+        if st.button("Load Data"):
+            ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", urls_input)))
+            if ids:
+                with st.spinner(f"Analyzing {len(ids)} videos..."):
+                    raw_data = get_video_stats_batch(ids, YT_KEY)
+                    clean_data = [{
+                        "Title": item['snippet']['title'],
+                        "Views": int(item['statistics'].get('viewCount', 0)),
+                        "Likes": int(item['statistics'].get('likeCount', 0)),
+                        "Comments": int(item['statistics'].get('commentCount', 0)),
+                        "Date": item['snippet']['publishedAt'][:10]
+                    } for item in raw_data]
+                    st.session_state.analytics_data = pd.DataFrame(clean_data)
+                    st.success("✅ Data Loaded!")
+            else:
+                st.warning("No valid URLs.")
+
+        if st.session_state.analytics_data is not None:
+            st.dataframe(st.session_state.analytics_data, hide_index=True)
+            if "messages" not in st.session_state: st.session_state.messages = []
+            
+            for msg in st.session_state.messages:
+                with st.chat_message(msg["role"]): st.markdown(msg["content"])
+
+            if prompt := st.chat_input("Ask about your data..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"): st.markdown(prompt)
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        context = st.session_state.analytics_data.to_string()
+                        full_prompt = f"Data:\n{context}\n\nUser Question: {prompt}\nAnswer in English."
+                        response = ask_gemini(full_prompt, GEMINI_KEY)
+                        st.markdown(response)
+                        st.session_state.messages.append({"role": "assistant", "content": response})
+
+    # TAB 2: DOWNLOADER
     with tab2:
+        st.header("📥 Downloader")
+        st.info("ℹ️ Note: Cloud downloads are limited to the best MP4 with audio (720p).")
+        dl_urls = st.text_area("Paste URLs to download:", key="dl_area")
+        video_ids = list(set(re.findall(r"(?:v=|\/)([0-9A-Za-z_-]{11})", dl_urls)))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Download Thumbnails (ZIP)"):
+                if video_ids:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w") as zf:
+                        prog = st.progress(0)
+                        for i, vid in enumerate(video_ids):
+                            d, n = download_thumbnail_bytes(f"https://youtu.be/{vid}")
+                            if d: zf.writestr(n, d)
+                            prog.progress((i+1)/len(video_ids))
+                    st.download_button("⬇️ Download ZIP", zip_buffer.getvalue(), "thumbs.zip", "application/zip")
+
+        with col2:
+            if st.button("Get Video Links"):
+                if video_ids:
+                    for vid in video_ids:
+                        try:
+                            with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
+                                info = ydl.extract_info(f"https://youtu.be/{vid}", download=False)
+                                best_url = None
+                                best_res = 0
+                                for f in info['formats']:
+                                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
+                                        h = f.get('height', 0)
+                                        if h > best_res:
+                                            best_res = h
+                                            best_url = f['url']
+                                if best_url:
+                                    st.markdown(f"🎥 **{info['title']}**: [Download]({best_url})")
+                                else: st.warning(f"No direct link for {info['title']}")
+                        except: st.error(f"Error: {vid}")
+
+    # TAB 3: DEEP DIVE
+    with tab3:
         st.header("🔴 Single Video Analysis")
         sv_url = st.text_input("URL:")
+        task = st.selectbox("Action:", ["Summarize Comments", "Generate Video Ideas", "Detect Questions", "SEO Optimization"])
         
-        if st.button("Analyze Video"):
+        if st.button("Analyze"):
             vid = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", sv_url)
             if vid:
                 with st.spinner("Fetching comments..."):
                     comments = get_video_comments(vid.group(1), YT_KEY)
-                
                 if comments:
-                    st.success(f"Fetched {len(comments)} comments.")
-                    prompt = f"Summarize these comments:\n{comments[:50]}" # Limit for test
-                    
-                    with st.spinner(f"Asking Gemini ({default_model})..."):
-                        res = ask_gemini(prompt, GEMINI_KEY, default_model)
-                        st.markdown(res)
-                else:
-                    st.error("No comments found.")
+                    full_text = "\n".join(comments)[:30000]
+                    prompts = {
+                        "Summarize Comments": f"Summarize sentiment:\n{full_text}",
+                        "Generate Video Ideas": f"5 video ideas based on:\n{full_text}",
+                        "Detect Questions": f"Questions needing answers in:\n{full_text}",
+                        "SEO Optimization": f"SEO tags for:\n{full_text}"
+                    }
+                    with st.spinner("Thinking..."):
+                        st.write(ask_gemini(prompts[task], GEMINI_KEY))
+                else: st.warning("No comments found.")
 
 if __name__ == "__main__":
     if check_login():
