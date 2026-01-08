@@ -2,8 +2,5 @@ streamlit
 google-api-python-client
 google-generativeai>=0.8.0
 pandas
-yt-dlp
-requests
 plotly
-pillow
-youtube-transcript-api
+isodate
